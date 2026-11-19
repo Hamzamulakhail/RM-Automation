@@ -1,4 +1,4 @@
-# Page Poster
+# RM Automation
 
 Bulk auto-poster from Google Drive to Facebook Pages with a bilingual (Pashto RTL / English) admin panel, built for **Cloudflare Workers** + **Cloudflare D1** using plain JavaScript ES modules and Web APIs.
 
@@ -6,10 +6,10 @@ Bulk auto-poster from Google Drive to Facebook Pages with a bilingual (Pashto RT
 
 ## Setup & Deployment Steps
 
-### 1. Create a D1 Database
-1. Open the **Cloudflare Dashboard** → **Storage & Databases** → **D1 SQL Database** → **Create**.
-2. Name it `page-poster-db`.
-3. Copy the **Database ID** and replace `REPLACE_WITH_D1_DATABASE_ID` in `wrangler.jsonc`.
+### 1. D1 Database (`page-poster-db`)
+`wrangler.jsonc` binds `"DB"` to `"database_name": "page-poster-db"` without a placeholder `database_id`:
+- Wrangler 4 automatically connects to an existing D1 database named `page-poster-db` or provisions it on deploy (or inherits an existing `DB` binding from your Worker's **Settings → Bindings** in the Cloudflare Dashboard).
+- If you prefer creating it manually first: open **Cloudflare Dashboard** → **Storage & Databases** → **D1 SQL Database** → **Create** → name it `page-poster-db` (and optionally bind it as `DB` under **Workers & Pages** → `rm-automation` → **Settings** → **Bindings**).
 
 *(Database tables and indexes are created automatically on first request or cron run via `CREATE TABLE IF NOT EXISTS`.)*
 
@@ -19,11 +19,11 @@ Commit and push all files in this repository to a GitHub repository.
 ### 3. Deploy via Cloudflare Workers Git Integration
 1. In the **Cloudflare Dashboard**, go to **Workers & Pages** → **Create** → **Import a repository**.
 2. Select your GitHub repository.
-3. Make sure the **Worker name** is exactly `page-poster` (matching `"name": "page-poster"` in `wrangler.jsonc`).
+3. Make sure the **Worker name** is `rm-automation` (matching `"name": "rm-automation"` in `wrangler.jsonc`).
 4. Deploy command: `npx wrangler deploy` (or `npm run deploy`).
 
 ### 4. Configure the 6 Secrets
-In Cloudflare Dashboard → **Workers & Pages** → `page-poster` → **Settings** → **Variables and Secrets**, add these **6 Secrets**:
+In Cloudflare Dashboard → **Workers & Pages** → `rm-automation` → **Settings** → **Variables and Secrets**, add these **6 Secrets**:
 
 | Secret Name | Value |
 |---|---|
@@ -46,26 +46,26 @@ In Cloudflare Dashboard → **Workers & Pages** → `page-poster` → **Settings
 1. Open **Meta for Developers** → create or open your App → add **Facebook Login for Business** (or **Facebook Login**).
 2. Under **Facebook Login** → **Settings**, add Valid OAuth Redirect URI:
    ```text
-   https://page-poster.<your-subdomain>.workers.dev/auth/facebook/callback
+   https://rm-automation.<your-subdomain>.workers.dev/auth/facebook/callback
    ```
 3. Under **App Settings** → **Basic**, set:
-   - **Privacy Policy URL**: `https://page-poster.<your-subdomain>.workers.dev/privacy.html`
-   - **User Data Deletion URL**: `https://page-poster.<your-subdomain>.workers.dev/data-deletion.html`
-4. While the Meta App is in **Development Mode**, go to **App Roles** → **Roles** and add every Facebook ID (account) you plan to connect — **including any invitees using Invite Links** — as an **Administrator**, **Developer**, or **Tester** (and make sure they accept the role invite in Facebook before opening the Page Poster invite link). Until your Meta App passes App Review and is switched to **Live Mode**, Facebook will block non-Testers with an app-not-active/not-authorized error.
+   - **Privacy Policy URL**: `https://rm-automation.<your-subdomain>.workers.dev/privacy.html`
+   - **User Data Deletion URL**: `https://rm-automation.<your-subdomain>.workers.dev/data-deletion.html`
+4. While the Meta App is in **Development Mode**, go to **App Roles** → **Roles** and add every Facebook ID (account) you plan to connect — **including any invitees using Invite Links** — as an **Administrator**, **Developer**, or **Tester** (and make sure they accept the role invite in Facebook before opening the RM Automation invite link). Until your Meta App passes App Review and is switched to **Live Mode**, Facebook will block non-Testers with an app-not-active/not-authorized error.
 
 ---
 
 ## Invite Links (Connecting Someone Else's Facebook ID)
 
-Invite links allow the owner of another Facebook account to log in to Facebook themselves and grant access only to the Pages they pick, without ever getting access to your Page Poster admin panel.
+Invite links allow the owner of another Facebook account to log in to Facebook themselves and grant access only to the Pages they pick, without ever getting access to your RM Automation admin panel.
 
-1. Sign in to Page Poster as admin and open **Accounts & Invites**.
+1. Sign in to RM Automation as admin and open **Accounts & Invites**.
 2. Under **Create Invite Link**, enter an optional label (e.g. `Maria - PH ID`), choose an expiry (default **48 hours**, max **7 days**), and click **Create invite link**.
 3. Copy or share the generated URL (`/invite/<token>`). Only the SHA-256 hash is stored in D1, so the raw link is displayed once at creation.
 4. Send the link to the Facebook ID owner:
    - If your Meta App is still in **Development Mode**, add their Facebook account as a **Tester** under **App Roles → Roles** in the Meta App Dashboard first.
    - When they open `/invite/<token>`, they see a clear disclosure of permissions, tick the consent checkbox, click **Continue with Facebook**, authenticate directly with Meta, select at least one Page, and confirm.
-   - Their account and selected Pages are stored encrypted (AES-GCM), the invite is immediately marked **Used** (single-use), and their temporary 15-minute `SameSite=Lax` invite cookie grants no access to any other Page Poster route.
+   - Their account and selected Pages are stored encrypted (AES-GCM), the invite is immediately marked **Used** (single-use), and their temporary 15-minute `SameSite=Lax` invite cookie grants no access to any other RM Automation route.
 5. You can revoke an unused invite at any time from the Invites list (**Revoke**).
 
 ---
