@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data Deletion Instructions — RM Automation</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="legal-wrap">
+    <div class="card legal-card">
+      <h1>User Data Deletion Instructions</h1>
+      <p>
+        <strong>RM Automation</strong> stores your Facebook account identifier, Page identifiers, encrypted access tokens,
+        schedule configuration, and operational logs inside your private Cloudflare D1 database.
+      </p>
+      <h2>How to Delete Your Data</h2>
+      <ol>
+        <li>Open the RM Automation admin panel and sign in.</li>
+        <li>Go to the <strong>Accounts</strong> tab and click <strong>Delete</strong> next to any connected Facebook account. This immediately deletes the account record, encrypted user token, linked Pages, encrypted Page tokens, and scheduled plan rows from D1.</li>
+        <li>To revoke app permissions on Facebook directly: open Facebook &rarr; <strong>Settings &amp; Privacy</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Business Integrations</strong> (or <strong>Apps and Websites</strong>), select <strong>RM Automation</strong>, and click <strong>Remove</strong>.</li>
+        <li>To wipe all remaining logs or configuration, delete or reset the Cloudflare D1 database (<code>page-poster-db</code>) from your Cloudflare Dashboard.</li>
+      </ol>
+      <p>
+        For questions or manual removal requests, contact the operator of this RM Automation instance.
+      </p>
+    </div>
+  </main>
+</body>
+</html>

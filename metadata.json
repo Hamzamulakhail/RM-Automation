@@ -1,0 +1,6 @@
+{
+  "name": "Page Poster",
+  "description": "Bulk auto-poster from Google Drive to Facebook Pages with an admin panel on Cloudflare Workers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
