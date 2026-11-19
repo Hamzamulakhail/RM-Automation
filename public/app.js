@@ -11,6 +11,7 @@ import {
   renderCommandPalette,
   renderConfirmModal,
   renderHeroToday,
+  renderLicensesView,
   renderLogsView,
   renderPageCard,
   renderPageDrawer,
@@ -42,14 +43,18 @@ const state = {
   density: safeStorageGet('pp_density') === 'compact' ? 'compact' : 'comfortable',
   sidebarCollapsed: safeStorageGet('pp_sidebar') === '1',
   authenticated: false,
+  role: null, // 'admin' | 'license'
+  workspaceLabel: '',
+  maxPages: null,
   checkingAuth: true,
   initialLoading: false,
-  tab: 'dashboard', // dashboard | accounts | pages | logs | settings
-  dashboard: { globalPause: false, pages: [], accounts: [], sparklines: null, needsAttentionCount: 0 },
+  tab: 'dashboard', // dashboard | accounts | pages | licenses | logs | settings
+  dashboard: { globalPause: false, ownerGlobalPause: false, pages: [], accounts: [], sparklines: null, needsAttentionCount: 0 },
   accounts: [],
-  invites: [],
-  createdInviteUrl: '',
-  inviteCopied: false,
+  licenses: [],
+  createdLicenseKey: '',
+  licenseKeyCopied: false,
+  tokenMode: 'user', // 'user' | 'page'
   events: [],
   eventFilters: { pageId: '', level: '', date: '' },
   dashFilters: { search: '', accountId: '', status: '', sort: 'next' },
@@ -66,6 +71,8 @@ const state = {
   loginError: '',
   manualTokenError: '',
   fbOAuthBanner: '',
+  googleBanner: '',
+  googleError: '',
 };
 
 let toastTimer = null;
@@ -87,6 +94,7 @@ function applyPreferences() {
     dashboard: 'navDashboard',
     accounts: 'navAccounts',
     pages: 'navPages',
+    licenses: 'navLicenses',
     logs: 'navLogs',
     settings: 'navSettings',
   };
@@ -123,6 +131,7 @@ function showToast(msg) {
 const api = (path, options = {}) =>
   apiFetch(path, options, () => {
     state.authenticated = false;
+    state.role = null;
     state.drawer = null;
     state.modal = null;
     state.confirm = null;
@@ -132,14 +141,20 @@ const api = (path, options = {}) =>
   });
 
 async function loadAllData() {
-  const [dash, accs, invs] = await Promise.all([
-    api('/api/dashboard'),
-    api('/api/accounts'),
-    api('/api/invites'),
-  ]);
+  const requests = [api('/api/dashboard'), api('/api/accounts'), api('/api/drive/info')];
+  if (state.role === 'admin') {
+    requests.push(api('/api/licenses'));
+  }
+  const [dash, accs, driveInfo, lics] = await Promise.all(requests);
   state.dashboard = dash;
   state.accounts = accs.accounts || [];
-  state.invites = invs.invites || [];
+  state.driveInfo = driveInfo;
+  if (state.role === 'admin') {
+    state.licenses = lics?.licenses || [];
+  } else {
+    state.licenses = [];
+    if (state.tab === 'licenses') state.tab = 'dashboard';
+  }
   if (state.tab === 'logs') {
     await loadEvents();
   }
@@ -354,7 +369,7 @@ function renderLogin() {
         <form id="loginForm" class="stack" novalidate>
           <div class="field">
             <label for="loginPassword">${esc(t('passwordLabel'))}</label>
-            <input id="loginPassword" type="password" class="input" required autocomplete="current-password" />
+            <input id="loginPassword" type="password" class="input ltr" placeholder="${esc(t('passwordPlaceholder'))}" required autocomplete="current-password" />
           </div>
           <button type="submit" class="btn btn-primary" ${state.busy.has('login') ? 'disabled' : ''}>
             ${state.busy.has('login') ? icons.spinner() : ''}
@@ -400,7 +415,7 @@ function getFilteredPages() {
 }
 
 function renderDashboard() {
-  const { globalPause, pages, accounts, sparklines } = state.dashboard;
+  const { globalPause, ownerGlobalPause, pages, accounts, sparklines } = state.dashboard;
   const attentionPages = pages.filter(
     (p) => p.status === 'needs_attention' || p.account_status === 'needs_attention'
   );
@@ -408,6 +423,11 @@ function renderDashboard() {
 
   return `
     <div class="stack">
+      ${
+        ownerGlobalPause
+          ? `<div class="inline-alert inline-alert-warn">${icons.alertTriangle()}<strong>${esc(t('ownerPauseNoticeBanner'))}</strong></div>`
+          : ''
+      }
       ${
         globalPause
           ? `<div class="inline-alert inline-alert-danger">${icons.pause()}<strong>${esc(t('globalPauseActiveBanner'))}</strong></div>`
@@ -570,10 +590,12 @@ function render() {
     return;
   }
 
+  const isAdmin = state.role === 'admin';
   const navItems = [
     { id: 'dashboard', label: t('navDashboard'), icon: icons.dashboard() },
     { id: 'accounts', label: t('navAccounts'), icon: icons.accounts() },
     { id: 'pages', label: t('navPages'), icon: icons.pages() },
+    ...(isAdmin ? [{ id: 'licenses', label: t('navLicenses'), icon: icons.key() }] : []),
     { id: 'logs', label: t('navLogs'), icon: icons.logs() },
   ];
 
@@ -586,6 +608,8 @@ function render() {
     mainContent = renderAccountsView(state, state.lang, state.busy);
   } else if (state.tab === 'pages') {
     mainContent = renderPagesTab();
+  } else if (state.tab === 'licenses' && isAdmin) {
+    mainContent = renderLicensesView(state, state.lang, state.busy);
   } else if (state.tab === 'logs') {
     mainContent = renderLogsView(state, state.lang);
   } else if (state.tab === 'settings') {
@@ -597,6 +621,9 @@ function render() {
     state.tab === 'settings'
       ? t('navSettings')
       : navItems.find((n) => n.id === state.tab)?.label || t('appName');
+  const workspaceBadgeText = isAdmin
+    ? t('workspaceAdmin')
+    : `${state.workspaceLabel || t('workspaceLicense')}${state.maxPages ? ` · ${t('workspaceMaxPages', { max: state.maxPages })}` : ''}`;
 
   root.innerHTML = `
     <div class="app-shell">
@@ -606,7 +633,7 @@ function render() {
             <div class="brand-mark">RM</div>
             <div class="brand-text">
               <div class="brand-title">${esc(t('appName'))}</div>
-              <span class="sidebar-badge">${esc(t('commandCenterBadge'))}</span>
+              <span class="sidebar-badge">${esc(workspaceBadgeText)}</span>
             </div>
           </div>
           <button type="button" class="btn btn-icon btn-ghost" id="sidebarCollapseBtn" aria-label="${esc(state.sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar'))}" title="${esc(state.sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar'))}">
@@ -693,8 +720,8 @@ function render() {
     ${renderPageDrawer(state.drawer, state.driveInfo, state.driveFolders, state.lang, state.busy)}
     ${renderPickPagesModal(state.modal, state.lang)}
     ${renderConfirmModal(state.confirm, state.lang)}
-    ${renderQuickActionsSheet(state.quickSheetOpen, globalPaused, state.lang)}
-    ${renderCommandPalette(state.palette, state.dashboard.pages || [], globalPaused, state.lang)}
+    ${renderQuickActionsSheet(state.quickSheetOpen, globalPaused, state.lang, isAdmin)}
+    ${renderCommandPalette(state.palette, state.dashboard.pages || [], globalPaused, state.lang, isAdmin)}
     ${state.toast ? `<div class="toast" role="status" aria-live="polite">${esc(state.toast)}</div>` : ''}
   `;
 
@@ -793,8 +820,11 @@ function bindEvents() {
     state.busy.add('login');
     render();
     try {
-      await api('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
+      const res = await api('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
       state.authenticated = true;
+      state.role = res.role || 'admin';
+      state.workspaceLabel = res.label || '';
+      state.maxPages = res.maxPages ?? null;
       state.initialLoading = true;
       render();
       await loadAllData();
@@ -810,6 +840,16 @@ function bindEvents() {
   document.getElementById('logoutBtn')?.addEventListener('click', async () => {
     await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
     state.authenticated = false;
+    state.role = null;
+    state.workspaceLabel = '';
+    state.maxPages = null;
+    state.licenses = [];
+    state.createdLicenseKey = '';
+    state.accounts = [];
+    state.driveInfo = null;
+    state.driveFolders = null;
+    state.dashboard = { globalPause: false, ownerGlobalPause: false, pages: [], accounts: [], sparklines: null, needsAttentionCount: 0 };
+    state.tab = 'dashboard';
     state.drawer = null;
     state.modal = null;
     state.confirm = null;
@@ -865,10 +905,11 @@ function bindEvents() {
     render();
   });
 
-  // Manual Token Form
+  // 2-Mode Facebook Token Form
   document.getElementById('manualTokenForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const token = document.getElementById('manualTokenInput').value.trim();
+    const inputEl = document.getElementById('manualTokenInput');
+    const token = inputEl.value.trim();
     if (!token) {
       state.manualTokenError = t('manualTokenRequired');
       render();
@@ -878,9 +919,19 @@ function bindEvents() {
     state.busy.add('manual-account');
     render();
     try {
-      const res = await api('/api/accounts/manual', { method: 'POST', body: JSON.stringify({ token }) });
+      const res = await api('/api/accounts/manual', {
+        method: 'POST',
+        body: JSON.stringify({ token, mode: state.tokenMode }),
+      });
       await loadAllData();
-      if (res.account?.id) await openPickPagesModal(res.account.id);
+      if (res.mode === 'page') {
+        showToast(t('pageConnectedSuccess', { name: res.page?.name || '' }));
+        if (state.driveInfo?.configured && res.page?.id) {
+          await openDrawer(res.page.id, 'drive');
+        }
+      } else if (res.account?.id) {
+        await openPickPagesModal(res.account.id);
+      }
     } catch (err) {
       state.manualTokenError = err.message;
     } finally {
@@ -889,47 +940,51 @@ function bindEvents() {
     }
   });
 
-  // Create Invite Form
-  document.getElementById('createInviteForm')?.addEventListener('submit', async (e) => {
+  // Super Admin Create License Form
+  document.getElementById('createLicenseForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const label = document.getElementById('inviteLabelInput')?.value.trim() || '';
-    const expiresHours = Number(document.getElementById('inviteExpirySelect')?.value || 48);
-    state.busy.add('create-invite');
+    const label = document.getElementById('licLabelInput')?.value.trim() || '';
+    const maxPages = Number(document.getElementById('licMaxPagesInput')?.value || 20);
+    const expiresDays = Number(document.getElementById('licExpirySelect')?.value || 0);
+    state.busy.add('create-license');
     render();
     try {
-      const res = await api('/api/invites', { method: 'POST', body: JSON.stringify({ label, expiresHours }) });
-      state.createdInviteUrl = res.inviteUrl || '';
-      state.inviteCopied = false;
+      const res = await api('/api/licenses', {
+        method: 'POST',
+        body: JSON.stringify({ label, maxPages, expiresDays }),
+      });
+      state.createdLicenseKey = res.rawKey || '';
+      state.licenseKeyCopied = false;
       await loadAllData();
     } catch (err) {
       showToast(err.message);
     } finally {
-      state.busy.delete('create-invite');
+      state.busy.delete('create-license');
       render();
     }
   });
 
-  document.getElementById('copyCreatedInviteBtn')?.addEventListener('click', async () => {
-    if (!state.createdInviteUrl) return;
-    await navigator.clipboard?.writeText(state.createdInviteUrl).catch(() => {});
-    state.inviteCopied = true;
+  document.getElementById('copyCreatedKeyBtn')?.addEventListener('click', async () => {
+    if (!state.createdLicenseKey) return;
+    await navigator.clipboard?.writeText(state.createdLicenseKey).catch(() => {});
+    state.licenseKeyCopied = true;
     showToast(t('copiedMsg'));
     if (copiedTimer) clearTimeout(copiedTimer);
     copiedTimer = setTimeout(() => {
-      state.inviteCopied = false;
+      state.licenseKeyCopied = false;
       render();
     }, 2200);
   });
 
-  document.getElementById('shareCreatedInviteBtn')?.addEventListener('click', async () => {
-    if (state.createdInviteUrl && navigator.share) {
-      await navigator.share({ title: t('appName'), url: state.createdInviteUrl }).catch(() => {});
+  document.getElementById('shareCreatedKeyBtn')?.addEventListener('click', async () => {
+    if (state.createdLicenseKey && navigator.share) {
+      await navigator.share({ title: t('appName'), text: state.createdLicenseKey }).catch(() => {});
     }
   });
 
-  document.getElementById('dismissCreatedInviteBtn')?.addEventListener('click', () => {
-    state.createdInviteUrl = '';
-    state.inviteCopied = false;
+  document.getElementById('dismissCreatedKeyBtn')?.addEventListener('click', () => {
+    state.createdLicenseKey = '';
+    state.licenseKeyCopied = false;
     render();
   });
 
@@ -960,6 +1015,35 @@ function bindEvents() {
       } else if (action === 'close-palette-backdrop' && evt.target === el) {
         state.palette.open = false;
         render();
+      } else if (action === 'set-token-mode') {
+        state.tokenMode = el.dataset.val === 'page' ? 'page' : 'user';
+        state.manualTokenError = '';
+        render();
+      } else if (action === 'prepare-update-token') {
+        state.tokenMode = el.dataset.mode === 'page' ? 'page' : 'user';
+        state.manualTokenError = '';
+        render();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.getElementById('manualTokenInput')?.focus();
+      } else if (action === 'confirm-disconnect-google') {
+        state.confirm = {
+          title: t('confirmDisconnectGoogleTitle'),
+          message: t('confirmDisconnectGoogleBody'),
+          danger: true,
+          onConfirm: async () => {
+            state.busy.add('disconnect-google');
+            render();
+            try {
+              state.driveInfo = await api('/api/drive/disconnect', { method: 'POST', body: '{}' });
+              state.driveFolders = null;
+              state.googleBanner = '';
+            } finally {
+              state.busy.delete('disconnect-google');
+              render();
+            }
+          },
+        };
+        render();
       } else if (action === 'set-status-chip') {
         state.dashFilters.status = el.dataset.val || '';
         render();
@@ -986,7 +1070,8 @@ function bindEvents() {
         state.palette.open = false;
         state.quickSheetOpen = false;
         if (cmd === 'cmd-pause') triggerGlobalPauseConfirm();
-        else if (cmd === 'cmd-invite' || cmd === 'cmd-add-page') switchTab('accounts');
+        else if (cmd === 'cmd-licenses') switchTab('licenses');
+        else if (cmd === 'cmd-add-page') switchTab('accounts');
         else if (cmd === 'cmd-logs') switchTab('logs');
         else if (cmd === 'cmd-settings') switchTab('settings');
       } else if (action === 'open-drawer') {
@@ -1078,13 +1163,27 @@ function bindEvents() {
           },
         };
         render();
-      } else if (action === 'confirm-revoke-invite') {
+      } else if (action === 'toggle-license') {
+        const nextStatus = el.dataset.status === 'active' ? 'disabled' : 'active';
+        await api(`/api/licenses/${id}`, { method: 'PATCH', body: JSON.stringify({ status: nextStatus }) })
+          .then(() => loadAllData())
+          .catch((e) => showToast(e.message));
+        render();
+      } else if (action === 'extend-license') {
+        await api(`/api/licenses/${id}`, { method: 'PATCH', body: JSON.stringify({ extendDays: 30 }) })
+          .then(async () => {
+            await loadAllData();
+            showToast('+30d');
+          })
+          .catch((e) => showToast(e.message));
+        render();
+      } else if (action === 'confirm-delete-license') {
         state.confirm = {
-          title: t('confirmRevokeTitle'),
-          message: t('confirmRevokeBody'),
+          title: t('confirmDeleteLicenseTitle'),
+          message: `${el.dataset.name || ''} — ${t('confirmDeleteLicenseBody')}`,
           danger: true,
           onConfirm: async () => {
-            await api(`/api/invites/${id}/revoke`, { method: 'POST', body: '{}' });
+            await api(`/api/licenses/${id}`, { method: 'DELETE' });
             await loadAllData();
           },
         };
@@ -1316,34 +1415,45 @@ async function init() {
   const url = new URL(window.location.href);
   const tabParam = url.searchParams.get('tab');
   const fbError = url.searchParams.get('fb_error');
-  const connectedAccountId = url.searchParams.get('connected_account');
+  const googleConnected = url.searchParams.get('google_connected');
+  const googleError = url.searchParams.get('google_error');
 
-  if (tabParam && ['dashboard', 'accounts', 'pages', 'logs', 'settings'].includes(tabParam)) {
+  if (tabParam && ['dashboard', 'accounts', 'pages', 'licenses', 'logs', 'settings'].includes(tabParam)) {
     state.tab = tabParam;
   }
   if (fbError) {
     state.fbOAuthBanner = fbError;
   }
+  if (googleConnected === '1') {
+    state.googleBanner = t('googleConnectedSuccess');
+  }
+  if (googleError) {
+    state.googleError = googleError;
+  }
 
   try {
     const sess = await api('/api/session');
     state.authenticated = Boolean(sess.authenticated);
+    state.role = sess.role || null;
+    state.workspaceLabel = sess.label || '';
+    state.maxPages = sess.maxPages ?? null;
   } catch {
     state.authenticated = false;
+    state.role = null;
   }
   state.checkingAuth = false;
 
   if (state.authenticated) {
+    if (state.tab === 'licenses' && state.role !== 'admin') {
+      state.tab = 'dashboard';
+    }
     state.initialLoading = true;
     render();
     await loadAllData().catch((e) => showToast(e.message));
     state.initialLoading = false;
-    if (connectedAccountId && /^\d+$/.test(connectedAccountId)) {
-      await openPickPagesModal(Number(connectedAccountId));
-    }
   }
 
-  if (fbError || connectedAccountId || tabParam) {
+  if (fbError || googleConnected || googleError || tabParam) {
     window.history.replaceState({}, '', '/');
   }
 

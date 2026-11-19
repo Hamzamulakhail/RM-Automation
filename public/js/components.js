@@ -542,25 +542,47 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
       </form>
     `;
   } else if (drawer.tab === 'drive') {
+    const driveMode = driveInfo?.mode || 'none';
     tabContent = `
       <div class="stack">
-        <div class="subcard stack">
-          <strong>${esc(t('driveStep1Title'))}</strong>
-          <p class="muted small-text" style="margin:0">${esc(t('driveStep1Hint'))}</p>
+        <div class="subcard stack-sm">
+          <div class="row">
+            <strong>${esc(t('googleDriveTitle'))}</strong>
+            ${
+              driveMode === 'oauth'
+                ? renderStatusBadge('active', driveInfo.googleEmail || 'Google Drive')
+                : driveMode === 'service_account'
+                  ? renderStatusBadge('info', 'Service Account')
+                  : renderStatusBadge('warn', t('noDriveConfigured'))
+            }
+          </div>
           ${
-            driveInfo?.configured
-              ? `<div class="row-start">
+            driveMode === 'service_account'
+              ? `
+                <p class="muted small-text" style="margin:0">${esc(t('driveStep1Hint'))}</p>
+                <div class="row-start">
                   <div class="code-box ltr" style="flex:1">${esc(driveInfo.serviceAccountEmail)}</div>
                   <button type="button" class="btn btn-sm" id="copySaEmailBtn">${icons.copy()}<span>${esc(t('copyEmailBtn'))}</span></button>
                 </div>`
-              : `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(driveInfo?.error || t('noDriveConfigured'))}</span></div>`
+              : driveMode === 'oauth'
+                ? `<div class="row">
+                    <span class="muted small-text">${esc(t('googleConnectedAs'))}: <strong class="ltr">${esc(driveInfo.googleEmail)}</strong></span>
+                    ${driveInfo.googleOAuthAvailable ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>` : ''}
+                  </div>`
+                : `
+                  <p class="muted small-text" style="margin:0">${esc(driveInfo?.error || t('googleNotConnected'))}</p>
+                  ${
+                    driveInfo?.googleOAuthAvailable
+                      ? `<div><a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
+                      : ''
+                  }`
           }
         </div>
 
         <div class="subcard stack">
           <div class="row">
             <strong>${esc(t('driveStep2Title'))}</strong>
-            <button type="button" class="btn btn-sm" id="loadFoldersBtn" ${drawer.driveFoldersLoading ? 'disabled' : ''}>
+            <button type="button" class="btn btn-sm" id="loadFoldersBtn" ${drawer.driveFoldersLoading || !driveInfo?.configured ? 'disabled' : ''}>
               ${drawer.driveFoldersLoading ? icons.spinner() : icons.refresh()}
               <span>${esc(t('loadFoldersBtn'))}</span>
             </button>
@@ -752,139 +774,138 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
   `;
 }
 
-function renderInviteLifecycle(inv, lang) {
+function renderGoogleDriveCard(driveInfo, busyMap, lang) {
   const t = (k) => translate(lang, k);
-  const createdDone = true;
-  const openedDone = Boolean(inv.opened) || inv.status === 'used';
-  const connectedDone = inv.status === 'used';
+  const mode = driveInfo?.mode || 'none';
+  const disconnecting = busyMap.has('disconnect-google');
 
   return `
-    <div class="lifecycle">
-      <span class="life-step ${createdDone ? 'done' : ''}"><span class="life-dot"></span><span>${esc(t('inviteStepCreated'))}</span></span>
-      <span class="life-line ${openedDone ? 'done' : ''}"></span>
-      <span class="life-step ${openedDone ? 'done' : ''}"><span class="life-dot"></span><span>${esc(t('inviteStepOpened'))}</span></span>
-      <span class="life-line ${connectedDone ? 'done' : ''}"></span>
-      <span class="life-step ${connectedDone ? 'done' : ''}"><span class="life-dot"></span><span>${esc(t('inviteStepConnected'))}</span></span>
-    </div>
+    <section class="card stack-sm">
+      <div class="row">
+        <div class="row-start">
+          <div class="avatar-circle" style="background:linear-gradient(135deg,#0ea5e9,#10b981)">${icons.folder()}</div>
+          <div>
+            <h2 class="section-title">${esc(t('googleDriveTitle'))}</h2>
+            <p class="muted small-text" style="margin:2px 0 0">${esc(t('googleDriveDesc'))}</p>
+          </div>
+        </div>
+        ${
+          mode === 'oauth'
+            ? renderStatusBadge('active', driveInfo.googleEmail || 'Connected')
+            : mode === 'service_account'
+              ? renderStatusBadge('info', 'Service Account')
+              : renderStatusBadge('warn', t('googleNotConnected'))
+        }
+      </div>
+
+      ${
+        mode === 'oauth'
+          ? `
+            <div class="subcard row">
+              <div>
+                <span class="muted small-text">${esc(t('googleConnectedAs'))}:</span>
+                <strong class="ltr">${esc(driveInfo.googleEmail)}</strong>
+              </div>
+              <div class="row-start">
+                ${
+                  driveInfo.googleOAuthAvailable
+                    ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>`
+                    : ''
+                }
+                <button type="button" class="btn btn-sm btn-danger-outline" data-action="confirm-disconnect-google" ${disconnecting ? 'disabled' : ''}>
+                  ${disconnecting ? icons.spinner() : icons.trash()}
+                  <span>${esc(t('disconnectGoogleBtn'))}</span>
+                </button>
+              </div>
+            </div>`
+          : mode === 'service_account'
+            ? `
+              <div class="subcard stack-sm">
+                <div class="muted small-text">${esc(t('googleSaFallbackHint'))}</div>
+                <div class="code-box ltr">${esc(driveInfo.serviceAccountEmail)}</div>
+                ${
+                  driveInfo.googleOAuthAvailable
+                    ? `<div><a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
+                    : ''
+                }
+              </div>`
+            : `
+              <div class="inline-alert ${driveInfo?.googleOAuthAvailable ? 'inline-alert-warn' : 'inline-alert-danger'}">
+                ${icons.alertTriangle()}
+                <span>${esc(driveInfo?.googleOAuthAvailable ? t('googleNotConnected') : t('googleNotConfiguredMsg'))}</span>
+              </div>
+              ${
+                driveInfo?.googleOAuthAvailable
+                  ? `<div><a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
+                  : ''
+              }`
+      }
+    </section>
   `;
 }
 
 export function renderAccountsView(state, lang, busyMap) {
   const t = (k, v) => translate(lang, k, v);
-  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
-  const creatingInvite = busyMap.has('create-invite');
   const addingManual = busyMap.has('manual-account');
+  const tokenMode = state.tokenMode === 'page' ? 'page' : 'user';
 
   return `
     <div class="stack">
+      ${state.googleBanner ? `<div class="inline-alert inline-alert-success">${icons.checkCircle()}<span>${esc(state.googleBanner)}</span></div>` : ''}
+      ${state.googleError ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(state.googleError)}</span></div>` : ''}
       ${state.fbOAuthBanner ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(state.fbOAuthBanner)}</span></div>` : ''}
 
+      ${renderGoogleDriveCard(state.driveInfo, busyMap, lang)}
+
       <section class="card stack">
-        <div class="row">
-          <h2 class="section-title">${esc(t('navAccounts'))}</h2>
-          <a href="/auth/facebook/start" class="btn btn-primary">${icons.link()}<span>${esc(t('connectFbBtn'))}</span></a>
+        <div>
+          <h2 class="section-title">${esc(t('fbConnectTitle'))}</h2>
+          <p class="muted small-text" style="margin:4px 0 0">${esc(t('fbConnectDesc'))}</p>
         </div>
-        <div class="divider"></div>
+
+        <div class="seg-group" role="tablist" aria-label="${esc(t('fbConnectTitle'))}">
+          <button
+            type="button"
+            role="tab"
+            aria-selected="${tokenMode === 'user' ? 'true' : 'false'}"
+            class="seg-btn ${tokenMode === 'user' ? 'active' : ''}"
+            data-action="set-token-mode"
+            data-val="user"
+          >
+            ${icons.accounts()}<span>${esc(t('fbModeUser'))}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected="${tokenMode === 'page' ? 'true' : 'false'}"
+            class="seg-btn ${tokenMode === 'page' ? 'active' : ''}"
+            data-action="set-token-mode"
+            data-val="page"
+          >
+            ${icons.pages()}<span>${esc(t('fbModePage'))}</span>
+          </button>
+        </div>
+
+        <div class="subcard muted small-text">
+          ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
+        </div>
+
         <form id="manualTokenForm" class="stack-sm">
-          <label for="manualTokenInput" class="field-label">${esc(t('manualTokenTitle'))}</label>
           <div class="row-start">
-            <input id="manualTokenInput" type="password" class="input ltr" style="flex:1;min-width:210px" placeholder="${esc(t('manualTokenPlaceholder'))}" />
-            <button type="submit" class="btn" ${addingManual ? 'disabled' : ''}>
+            <input
+              id="manualTokenInput"
+              type="password"
+              class="input ltr"
+              style="flex:1;min-width:220px"
+              placeholder="${esc(tokenMode === 'page' ? t('fbPageTokenPlaceholder') : t('fbUserTokenPlaceholder'))}"
+            />
+            <button type="submit" class="btn btn-primary" ${addingManual ? 'disabled' : ''}>
               ${addingManual ? icons.spinner() : icons.plus()}
-              <span>${esc(t('addManualTokenBtn'))}</span>
+              <span>${esc(tokenMode === 'page' ? t('connectPageDirectBtn') : t('addManualTokenBtn'))}</span>
             </button>
           </div>
           ${state.manualTokenError ? `<div class="field-error">${esc(state.manualTokenError)}</div>` : ''}
         </form>
-      </section>
-
-      <section class="card stack">
-        <div>
-          <h2 class="section-title">${esc(t('invitesTitle'))}</h2>
-          <p class="muted small-text" style="margin:4px 0 0">${esc(t('invitesDesc'))}</p>
-        </div>
-
-        <form id="createInviteForm" class="form-grid form-grid-3" style="align-items:end">
-          <div class="field">
-            <label for="inviteLabelInput">${esc(t('inviteLabelInput'))}</label>
-            <input id="inviteLabelInput" class="input" maxlength="120" placeholder="Maria - PH ID" />
-          </div>
-          <div class="field">
-            <label for="inviteExpirySelect">${esc(t('inviteExpiryLabel'))}</label>
-            <select id="inviteExpirySelect" class="select">
-              <option value="12">${esc(t('exp12h'))}</option>
-              <option value="24">${esc(t('exp24h'))}</option>
-              <option value="48" selected>${esc(t('exp48h'))}</option>
-              <option value="72">${esc(t('exp72h'))}</option>
-              <option value="168">${esc(t('exp7d'))}</option>
-            </select>
-          </div>
-          <div>
-            <button type="submit" class="btn btn-primary" style="width:100%" ${creatingInvite ? 'disabled' : ''}>
-              ${creatingInvite ? icons.spinner() : icons.link()}
-              <span>${esc(t('createInviteBtn'))}</span>
-            </button>
-          </div>
-        </form>
-
-        ${
-          state.createdInviteUrl
-            ? `<div class="subcard stack-sm" style="border-color:var(--accent-1)">
-                <div class="row">
-                  <strong>${esc(t('inviteCreatedTitle'))}</strong>
-                  <button type="button" class="btn btn-sm btn-ghost" id="dismissCreatedInviteBtn" aria-label="${esc(t('closeBtn'))}">${icons.close()}</button>
-                </div>
-                <div class="code-box ltr">${esc(state.createdInviteUrl)}</div>
-                <div class="row-start">
-                  <button type="button" class="btn btn-sm btn-primary ${state.inviteCopied ? 'is-copied' : ''}" id="copyCreatedInviteBtn">
-                    ${state.inviteCopied ? icons.check() : icons.copy()}
-                    <span>${esc(state.inviteCopied ? t('copiedMsg') : t('copyLinkBtn'))}</span>
-                  </button>
-                  ${canShare ? `<button type="button" class="btn btn-sm" id="shareCreatedInviteBtn">${icons.share()}<span>${esc(t('shareLinkBtn'))}</span></button>` : ''}
-                </div>
-              </div>`
-            : ''
-        }
-
-        ${
-          state.invites.length === 0
-            ? `<div class="muted small-text">${esc(t('invitesListEmpty'))}</div>`
-            : `<div class="table-card" style="border:1px solid var(--border);border-radius:var(--r-sm)">
-                <table class="responsive-table">
-                  <thead>
-                    <tr>
-                      <th>${esc(t('inviteColLabel'))}</th>
-                      <th>${esc(t('inviteColStatus'))}</th>
-                      <th>${esc(t('inviteColLifecycle'))}</th>
-                      <th>${esc(t('inviteColExpires'))}</th>
-                      <th>${esc(t('inviteColAccount'))}</th>
-                      <th>${esc(t('inviteColActions'))}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${state.invites
-                      .map(
-                        (inv) => `
-                        <tr>
-                          <td data-label="${esc(t('inviteColLabel'))}"><strong>${esc(inv.label || `#${inv.id}`)}</strong></td>
-                          <td data-label="${esc(t('inviteColStatus'))}">${renderStatusBadge(inv.status, t(`invite_${inv.status}`))}</td>
-                          <td data-label="${esc(t('inviteColLifecycle'))}">${renderInviteLifecycle(inv, lang)}</td>
-                          <td data-label="${esc(t('inviteColExpires'))}" title="${esc(formatExactUtc(inv.expires_at))}">${esc(formatRelativeTime(inv.expires_at, lang))}</td>
-                          <td data-label="${esc(t('inviteColAccount'))}">${esc(inv.account_name || '-')}</td>
-                          <td data-label="${esc(t('inviteColActions'))}">
-                            ${
-                              inv.status === 'pending'
-                                ? `<button class="btn btn-sm btn-danger-outline" data-action="confirm-revoke-invite" data-id="${inv.id}">${esc(t('revokeBtn'))}</button>`
-                                : '<span class="muted">-</span>'
-                            }
-                          </td>
-                        </tr>`
-                      )
-                      .join('')}
-                  </tbody>
-                </table>
-              </div>`
-        }
       </section>
 
       <section class="stack">
@@ -896,14 +917,18 @@ export function renderAccountsView(state, lang, busyMap) {
                 <p class="muted">${esc(t('noAccountsHint'))}</p>
               </div>`
             : state.accounts
-                .map(
-                  (a) => `
+                .map((a) => {
+                  const isPageDirect = a.token_kind === 'page_direct';
+                  return `
                 <div class="card stack-sm">
                   <div class="row">
                     <div class="row-start">
                       <div class="avatar-circle" style="background:${getAvatarGradient(a.name)}">${esc(getInitials(a.name))}</div>
                       <div>
-                        <strong style="font-size:16px">${esc(a.name)}</strong>
+                        <div class="row-start">
+                          <strong style="font-size:16px">${esc(a.name)}</strong>
+                          <span class="badge ${isPageDirect ? 'badge-info' : 'badge-neutral'}">${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))}</span>
+                        </div>
                         <div class="muted small-text ltr">ID: ${esc(a.fb_user_id)} · ${esc(t('connectedPagesCount'))}: ${a.page_count}</div>
                         ${
                           a.token_expires_at
@@ -916,14 +941,133 @@ export function renderAccountsView(state, lang, busyMap) {
                   </div>
                   ${a.last_error ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(a.last_error)}</span></div>` : ''}
                   <div class="row-start">
-                    <button class="btn btn-sm btn-primary" data-action="select-pages" data-id="${a.id}">${icons.pages()}<span>${esc(t('selectPagesBtn'))}</span></button>
+                    ${
+                      isPageDirect
+                        ? `<button class="btn btn-sm btn-primary" data-action="prepare-update-token" data-mode="page">${icons.key()}<span>${esc(t('updateTokenBtn'))}</span></button>`
+                        : `<button class="btn btn-sm btn-primary" data-action="select-pages" data-id="${a.id}">${icons.pages()}<span>${esc(t('selectPagesBtn'))}</span></button>`
+                    }
                     <button class="btn btn-sm" data-action="check-account" data-id="${a.id}">${icons.shield()}<span>${esc(t('checkTokenBtn'))}</span></button>
-                    <a href="/auth/facebook/start" class="btn btn-sm">${icons.refresh()}<span>${esc(t('reconnectBtn'))}</span></a>
                     <button class="btn btn-sm btn-danger-outline" data-action="confirm-delete-account" data-id="${a.id}" data-name="${esc(a.name)}">${icons.trash()}<span>${esc(t('deleteBtn'))}</span></button>
                   </div>
-                </div>`
-                )
+                </div>`;
+                })
                 .join('')
+        }
+      </section>
+    </div>
+  `;
+}
+
+export function renderLicensesView(state, lang, busyMap) {
+  const t = (k, v) => translate(lang, k, v);
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const creating = busyMap.has('create-license');
+
+  return `
+    <div class="stack">
+      <section class="card stack">
+        <div>
+          <h2 class="section-title">${esc(t('licensesTitle'))}</h2>
+          <p class="muted small-text" style="margin:4px 0 0">${esc(t('licensesDesc'))}</p>
+        </div>
+
+        <form id="createLicenseForm" class="form-grid form-grid-3" style="align-items:end">
+          <div class="field">
+            <label for="licLabelInput">${esc(t('licLabelInput'))}</label>
+            <input id="licLabelInput" class="input" maxlength="120" placeholder="${esc(t('licLabelPlaceholder'))}" />
+          </div>
+          <div class="field">
+            <label for="licMaxPagesInput">${esc(t('licMaxPagesLabel'))}</label>
+            <input id="licMaxPagesInput" type="number" min="1" max="500" class="input ltr" value="20" />
+          </div>
+          <div class="field">
+            <label for="licExpirySelect">${esc(t('licExpiryLabel'))}</label>
+            <select id="licExpirySelect" class="select">
+              <option value="0" selected>${esc(t('licNeverExpires'))}</option>
+              <option value="30">${esc(t('licDays30'))}</option>
+              <option value="90">${esc(t('licDays90'))}</option>
+              <option value="365">${esc(t('licDays365'))}</option>
+            </select>
+          </div>
+          <div>
+            <button type="submit" class="btn btn-primary" ${creating ? 'disabled' : ''}>
+              ${creating ? icons.spinner() : icons.key()}
+              <span>${esc(t('createLicenseBtn'))}</span>
+            </button>
+          </div>
+        </form>
+
+        ${
+          state.createdLicenseKey
+            ? `<div class="subcard stack-sm" style="border-color:var(--accent-1)">
+                <div class="row">
+                  <strong>${esc(t('licCreatedTitle'))}</strong>
+                  <button type="button" class="btn btn-sm btn-ghost" id="dismissCreatedKeyBtn" aria-label="${esc(t('closeBtn'))}">${icons.close()}</button>
+                </div>
+                <div class="code-box ltr" style="font-size:15px;font-weight:700">${esc(state.createdLicenseKey)}</div>
+                <div class="row-start">
+                  <button type="button" class="btn btn-sm btn-primary ${state.licenseKeyCopied ? 'is-copied' : ''}" id="copyCreatedKeyBtn">
+                    ${state.licenseKeyCopied ? icons.check() : icons.copy()}
+                    <span>${esc(state.licenseKeyCopied ? t('copiedMsg') : t('copyKeyBtn'))}</span>
+                  </button>
+                  ${canShare ? `<button type="button" class="btn btn-sm" id="shareCreatedKeyBtn">${icons.share()}<span>${esc(t('shareKeyBtn'))}</span></button>` : ''}
+                </div>
+              </div>`
+            : ''
+        }
+      </section>
+
+      <section class="card table-card">
+        ${
+          state.licenses.length === 0
+            ? `<div class="empty-state">${illustrations.noPages()}<p class="muted">${esc(t('licensesEmpty'))}</p></div>`
+            : `<div class="sticky-table-wrap">
+                <table class="responsive-table">
+                  <thead>
+                    <tr>
+                      <th>${esc(t('licColCustomer'))}</th>
+                      <th>${esc(t('licColStatus'))}</th>
+                      <th>${esc(t('licColUsage'))}</th>
+                      <th>${esc(t('licColDrive'))}</th>
+                      <th>${esc(t('licColExpires'))}</th>
+                      <th>${esc(t('licColActions'))}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${state.licenses
+                      .map((lic) => {
+                        const isActive = lic.status === 'active';
+                        return `
+                        <tr>
+                          <td data-label="${esc(t('licColCustomer'))}">
+                            <div><strong>${esc(lic.label || `#${lic.id}`)}</strong></div>
+                            <div class="muted small-text ltr">${esc(lic.key_prefix)}</div>
+                          </td>
+                          <td data-label="${esc(t('licColStatus'))}">${renderStatusBadge(lic.status, t(`status_${lic.status}`))}</td>
+                          <td data-label="${esc(t('licColUsage'))}" class="ltr"><strong>${Number(lic.page_count || 0)}</strong> / ${Number(lic.max_pages || 20)}</td>
+                          <td data-label="${esc(t('licColDrive'))}">${lic.google_email ? `<span class="badge badge-active ltr">${esc(lic.google_email)}</span>` : '<span class="muted">-</span>'}</td>
+                          <td data-label="${esc(t('licColExpires'))}" title="${esc(lic.expires_at ? formatExactUtc(lic.expires_at) : '')}">
+                            ${lic.expires_at ? esc(formatRelativeTime(lic.expires_at, lang)) : `<span class="muted">${esc(t('licNeverExpires'))}</span>`}
+                          </td>
+                          <td data-label="${esc(t('licColActions'))}">
+                            <div class="row-start">
+                              <button class="btn btn-sm" data-action="toggle-license" data-id="${lic.id}" data-status="${esc(lic.status)}">
+                                ${esc(t(isActive ? 'disableBtn' : 'enableBtn'))}
+                              </button>
+                              <button class="btn btn-sm" data-action="extend-license" data-id="${lic.id}">
+                                ${esc(t('extend30Btn'))}
+                              </button>
+                              <button class="btn btn-sm btn-danger-outline" data-action="confirm-delete-license" data-id="${lic.id}" data-name="${esc(lic.label || lic.key_prefix)}">
+                                ${icons.trash()}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>`;
+                      })
+                      .join('')}
+                  </tbody>
+                </table>
+              </div>`
         }
       </section>
     </div>
@@ -1049,14 +1193,14 @@ export function renderSettingsView(state, lang) {
   `;
 }
 
-export function renderCommandPalette(palette, pages, globalPause, lang) {
+export function renderCommandPalette(palette, pages, globalPause, lang, isAdmin = false) {
   if (!palette?.open) return '';
   const t = (k) => translate(lang, k);
   const q = (palette.query || '').trim().toLowerCase();
 
   const actions = [
     { id: 'cmd-pause', label: globalPause ? t('resumeAllBtn') : t('pauseAllBtn'), icon: globalPause ? icons.play() : icons.pause() },
-    { id: 'cmd-invite', label: t('createInviteAction'), icon: icons.link() },
+    ...(isAdmin ? [{ id: 'cmd-licenses', label: t('createLicenseAction'), icon: icons.key() }] : []),
     { id: 'cmd-add-page', label: t('addPageAction'), icon: icons.pages() },
     { id: 'cmd-logs', label: t('goToLogsAction'), icon: icons.logs() },
     { id: 'cmd-settings', label: t('navSettings'), icon: icons.settings() },
@@ -1117,7 +1261,7 @@ export function renderCommandPalette(palette, pages, globalPause, lang) {
   `;
 }
 
-export function renderQuickActionsSheet(open, globalPause, lang) {
+export function renderQuickActionsSheet(open, globalPause, lang, isAdmin = false) {
   if (!open) return '';
   const t = (k) => translate(lang, k);
   return `
@@ -1132,9 +1276,13 @@ export function renderQuickActionsSheet(open, globalPause, lang) {
           ${globalPause ? icons.play() : icons.pause()}
           <span>${esc(globalPause ? t('resumeAllBtn') : t('pauseAllBtn'))}</span>
         </button>
-        <button type="button" class="btn btn-primary" data-action="run-palette-action" data-cmd="cmd-invite">
-          ${icons.link()}<span>${esc(t('createInviteAction'))}</span>
-        </button>
+        ${
+          isAdmin
+            ? `<button type="button" class="btn btn-primary" data-action="run-palette-action" data-cmd="cmd-licenses">
+                ${icons.key()}<span>${esc(t('navLicenses'))}</span>
+              </button>`
+            : ''
+        }
         <button type="button" class="btn" data-action="run-palette-action" data-cmd="cmd-add-page">
           ${icons.pages()}<span>${esc(t('addPageAction'))}</span>
         </button>

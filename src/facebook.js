@@ -5,48 +5,6 @@ export function getGraphVersion(env) {
   return env.GRAPH_VERSION || 'v21.0';
 }
 
-export function buildOAuthUrl(env, origin, state) {
-  if (!env.META_APP_ID) {
-    throw new Error('META_APP_ID secret is not configured');
-  }
-  const version = getGraphVersion(env);
-  const redirectUri = `${origin}/auth/facebook/callback`;
-  const params = new URLSearchParams({
-    client_id: env.META_APP_ID,
-    redirect_uri: redirectUri,
-    state,
-    scope: 'pages_show_list,pages_manage_posts,pages_read_engagement',
-    response_type: 'code',
-  });
-  return `https://www.facebook.com/${version}/dialog/oauth?${params.toString()}`;
-}
-
-export async function exchangeCodeForLongLivedToken(env, origin, code) {
-  if (!env.META_APP_ID || !env.META_APP_SECRET) {
-    throw new Error('META_APP_ID and META_APP_SECRET secrets are required');
-  }
-  const version = getGraphVersion(env);
-  const redirectUri = `${origin}/auth/facebook/callback`;
-
-  const shortRes = await fetch(`https://graph.facebook.com/${version}/oauth/access_token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.META_APP_ID,
-      client_secret: env.META_APP_SECRET,
-      redirect_uri: redirectUri,
-      code,
-    }),
-  });
-  const shortData = await shortRes.json().catch(() => ({}));
-  if (!shortRes.ok || !shortData.access_token) {
-    const msg = shortData?.error?.message || `OAuth code exchange failed (${shortRes.status})`;
-    throw new Error(msg);
-  }
-
-  return exchangeUserTokenForLongLived(env, shortData.access_token);
-}
-
 export async function exchangeUserTokenForLongLived(env, shortToken) {
   if (!env.META_APP_ID || !env.META_APP_SECRET) {
     return { accessToken: shortToken, expiresIn: null };
@@ -88,6 +46,38 @@ export async function fetchMe(env, userToken) {
   return { id: String(data.id), name: data.name || `User ${data.id}` };
 }
 
+export async function fetchTokenIdentity(env, token, expectedMode = 'user') {
+  const version = getGraphVersion(env);
+  if (expectedMode === 'page') {
+    const res = await fetch(`https://graph.facebook.com/${version}/me?fields=id,name,category`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error || !data.id) {
+      const info = classifyFacebookError(res.status, data);
+      if (info.code === 100 && /category/i.test(info.message)) {
+        const err = new Error(
+          'This looks like a User Access Token, not a Page Access Token. Use "Account Token (All Pages)" mode.'
+        );
+        err.fbInfo = info;
+        throw err;
+      }
+      const err = new Error(info.message);
+      err.fbInfo = info;
+      throw err;
+    }
+    return {
+      kind: 'page',
+      id: String(data.id),
+      name: data.name || `Page ${data.id}`,
+      category: data.category || '',
+    };
+  }
+
+  const me = await fetchMe(env, token);
+  return { kind: 'user', id: me.id, name: me.name };
+}
+
 export async function fetchUserPages(env, userToken) {
   const version = getGraphVersion(env);
   const pages = [];
@@ -100,6 +90,13 @@ export async function fetchUserPages(env, userToken) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
       const info = classifyFacebookError(res.status, data);
+      if (info.code === 100 && /accounts/i.test(info.message) && /page/i.test(info.message)) {
+        const err = new Error(
+          'This is a Single Page Access Token, not a User Account Token. Switch to "Single Page Token" mode.'
+        );
+        err.fbInfo = info;
+        throw err;
+      }
       const err = new Error(info.message);
       err.fbInfo = info;
       throw err;

@@ -103,6 +103,21 @@ async function initSchema(db) {
       token TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS licenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_hash TEXT NOT NULL UNIQUE,
+      key_prefix TEXT NOT NULL DEFAULT '',
+      label TEXT NOT NULL DEFAULT '',
+      max_pages INTEGER NOT NULL DEFAULT 20,
+      status TEXT NOT NULL DEFAULT 'active',
+      expires_at TEXT,
+      global_pause INTEGER NOT NULL DEFAULT 0,
+      google_email TEXT,
+      google_encrypted_refresh_token TEXT,
+      google_connected_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS invites (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       token_hash TEXT NOT NULL UNIQUE,
@@ -121,19 +136,57 @@ async function initSchema(db) {
     `CREATE INDEX IF NOT EXISTS idx_blocked_page ON blocked_files(page_id)`,
     `CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at, page_id, level)`,
     `CREATE INDEX IF NOT EXISTS idx_invites_hash ON invites(token_hash)`,
+    `CREATE INDEX IF NOT EXISTS idx_licenses_hash ON licenses(key_hash)`,
     `INSERT OR IGNORE INTO settings (key, value) VALUES ('global_pause', '0')`,
   ];
 
   await db.batch(statements.map((sql) => db.prepare(sql)));
+
+  // Guarded additive column migrations for existing deployments
+  const [accCols, pageCols, eventCols] = await db.batch([
+    db.prepare(`PRAGMA table_info(accounts)`),
+    db.prepare(`PRAGMA table_info(pages)`),
+    db.prepare(`PRAGMA table_info(events)`),
+  ]);
+
+  const alterStmts = [];
+  const hasCol = (res, name) => (res.results || []).some((r) => r.name === name);
+
+  if (!hasCol(accCols, 'license_id')) {
+    alterStmts.push(`ALTER TABLE accounts ADD COLUMN license_id INTEGER`);
+  }
+  if (!hasCol(accCols, 'token_kind')) {
+    alterStmts.push(`ALTER TABLE accounts ADD COLUMN token_kind TEXT NOT NULL DEFAULT 'user'`);
+  }
+  if (!hasCol(pageCols, 'license_id')) {
+    alterStmts.push(`ALTER TABLE pages ADD COLUMN license_id INTEGER`);
+  }
+  if (!hasCol(eventCols, 'license_id')) {
+    alterStmts.push(`ALTER TABLE events ADD COLUMN license_id INTEGER`);
+  }
+
+  for (const sql of alterStmts) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      // Ignore duplicate column race across concurrent isolates
+    }
+  }
+
+  await db.batch([
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_accounts_license ON accounts(license_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_pages_license ON pages(license_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_events_license ON events(license_id)`),
+  ]);
 }
 
-export function prepareEventStmt(db, { pageId = null, level = 'info', eventType, message, details = null, createdAt = new Date().toISOString() }) {
+export function prepareEventStmt(db, { pageId = null, licenseId = null, level = 'info', eventType, message, details = null, createdAt = new Date().toISOString() }) {
   const detailsStr = details == null ? null : (typeof details === 'string' ? details : JSON.stringify(details));
   return db
     .prepare(
-      `INSERT INTO events (page_id, level, event_type, message, details, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO events (page_id, license_id, level, event_type, message, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(pageId, level, eventType, String(message).slice(0, 1000), detailsStr ? detailsStr.slice(0, 4000) : null, createdAt);
+    .bind(pageId, licenseId, level, eventType, String(message).slice(0, 1000), detailsStr ? detailsStr.slice(0, 4000) : null, createdAt);
 }
 
 export async function logEvent(db, payload) {

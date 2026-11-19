@@ -193,9 +193,10 @@ async function loadDriveInputsForPage(env, page, blockedFileIds) {
     throw err;
   }
 
+  const licenseId = page.license_id ?? null;
   const [captionsFile, mediaFiles] = await Promise.all([
-    findCaptionsFile(env, page.captions_folder_id),
-    listMediaFiles(env, page.media_folder_id),
+    findCaptionsFile(env, page.captions_folder_id, licenseId),
+    listMediaFiles(env, page.media_folder_id, licenseId),
   ]);
 
   if (!captionsFile) {
@@ -208,7 +209,7 @@ async function loadDriveInputsForPage(env, page, blockedFileIds) {
     };
   }
 
-  const captionsText = await downloadTextFile(env, captionsFile.id);
+  const captionsText = await downloadTextFile(env, captionsFile.id, licenseId);
   const selection = selectNextPair({ mediaFiles, captionsText, blockedFileIds });
 
   return {
@@ -259,7 +260,7 @@ export async function previewNextPostForPage(env, pageId) {
   if (inputs.missingCaptionsTxt) {
     warnings.push('captions.txt was not found in the selected Captions folder.');
   } else if (inputs.captionsFile && inputs.captionsFile.capabilities?.canEdit === false) {
-    warnings.push('captions.txt is view-only for the service account. Share the folder with Editor access.');
+    warnings.push('captions.txt is view-only. Grant Editor permission on Google Drive so RM Automation can update it.');
   }
 
   if (inputs.selection.duplicateCaptions.length > 0) {
@@ -304,22 +305,23 @@ export async function previewNextPostForPage(env, pageId) {
 }
 
 export async function executeCleanupForItem(env, page, item) {
+  const licenseId = page.license_id ?? null;
   try {
     // Step (2): Re-read captions.txt right before writing, remove caption block, upload with uploadType=media
     if (page.captions_folder_id && item.caption_number != null) {
-      const captionsFile = await findCaptionsFile(env, page.captions_folder_id);
+      const captionsFile = await findCaptionsFile(env, page.captions_folder_id, licenseId);
       if (captionsFile) {
-        let latestText = await downloadTextFile(env, captionsFile.id);
+        let latestText = await downloadTextFile(env, captionsFile.id, licenseId);
         let { updatedText, removed } = removeCaptionBlock(latestText, item.caption_number);
         if (removed) {
           try {
-            await updateTextFile(env, captionsFile.id, updatedText);
+            await updateTextFile(env, captionsFile.id, updatedText, licenseId);
           } catch (uploadErr) {
             // Re-read and re-apply once if concurrent modification or transient Drive error occurred
-            latestText = await downloadTextFile(env, captionsFile.id);
+            latestText = await downloadTextFile(env, captionsFile.id, licenseId);
             const retryResult = removeCaptionBlock(latestText, item.caption_number);
             if (retryResult.removed) {
-              await updateTextFile(env, captionsFile.id, retryResult.updatedText);
+              await updateTextFile(env, captionsFile.id, retryResult.updatedText, licenseId);
             }
           }
         }
@@ -329,7 +331,7 @@ export async function executeCleanupForItem(env, page, item) {
     // Step (3): Move media file to Drive trash (never permanent delete)
     if (item.file_id) {
       try {
-        await trashFile(env, item.file_id);
+        await trashFile(env, item.file_id, licenseId);
       } catch (trashErr) {
         if (trashErr.status !== 404) throw trashErr;
       }
@@ -340,6 +342,7 @@ export async function executeCleanupForItem(env, page, item) {
       env.DB.prepare(`UPDATE plan SET cleanup_pending = 0 WHERE id = ?`).bind(item.id),
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'info',
         eventType: 'cleanup_completed',
         message: `Cleaned up Drive item #${item.caption_number} (${item.file_name})`,
@@ -351,6 +354,7 @@ export async function executeCleanupForItem(env, page, item) {
     await env.DB.batch([
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'warn',
         eventType: 'cleanup_pending',
         message: `Drive cleanup failed (will retry, never repost): ${err.message}`,
@@ -363,6 +367,7 @@ export async function executeCleanupForItem(env, page, item) {
 
 async function executeClaimedItem(env, page, item, blockedFileIds) {
   const nowIso = new Date().toISOString();
+  const licenseId = page.license_id ?? null;
   let pageToken;
   try {
     pageToken = await decryptText(page.encrypted_page_token, env.ENCRYPTION_KEY);
@@ -380,6 +385,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
       ),
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'error',
         eventType: 'token_decrypt_failed',
         message: err.message,
@@ -406,6 +412,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
         ),
         prepareEventStmt(env.DB, {
           pageId: page.id,
+          licenseId,
           level: 'error',
           eventType: 'drive_config_error',
           message: err.message,
@@ -442,7 +449,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
 
     let blob;
     try {
-      blob = await downloadMediaBlob(env, file);
+      blob = await downloadMediaBlob(env, file, licenseId);
     } catch (dlErr) {
       if (dlErr.isTooLarge) {
         blockedFileIds.add(file.id);
@@ -453,6 +460,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
           ).bind(page.id, file.id, file.name, dlErr.message, nowIso),
           prepareEventStmt(env.DB, {
             pageId: page.id,
+            licenseId,
             level: 'error',
             eventType: 'file_blocked_size',
             message: dlErr.message,
@@ -506,6 +514,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
         env.DB.prepare(`UPDATE pages SET last_error = NULL, updated_at = ? WHERE id = ?`).bind(postedAt, page.id),
         prepareEventStmt(env.DB, {
           pageId: page.id,
+          licenseId,
           level: 'info',
           eventType: 'post_published',
           message: `Published #${number} (${file.name}) -> FB post ${fbPostId}`,
@@ -534,6 +543,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
           ),
           prepareEventStmt(env.DB, {
             pageId: page.id,
+            licenseId,
             level: 'error',
             eventType: 'fb_non_retriable_error',
             message: fbInfo.message,
@@ -560,6 +570,7 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
     ),
     prepareEventStmt(env.DB, {
       pageId: page.id,
+      licenseId,
       level: 'warn',
       eventType: 'no_pair_available',
       message: skipMsg,
@@ -576,6 +587,7 @@ async function handleRetriableOrExhaustedFailure(env, page, item, file, info) {
   const nextAttempts = Number(item.attempts || 0) + 1;
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
+  const licenseId = page.license_id ?? null;
 
   if (nextAttempts < MAX_ATTEMPTS) {
     const backoffMins = BACKOFF_MINUTES[Math.min(nextAttempts - 1, BACKOFF_MINUTES.length - 1)];
@@ -589,6 +601,7 @@ async function handleRetriableOrExhaustedFailure(env, page, item, file, info) {
       env.DB.prepare(`UPDATE pages SET last_error = ?, updated_at = ? WHERE id = ?`).bind(info.message, nowIso, page.id),
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'warn',
         eventType: 'post_retry_scheduled',
         message: `Attempt ${nextAttempts}/${MAX_ATTEMPTS} failed (${info.message}); retry in ${backoffMins}m`,
@@ -617,6 +630,7 @@ async function handleRetriableOrExhaustedFailure(env, page, item, file, info) {
     stmts.push(
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'error',
         eventType: 'file_blocked_failures',
         message: `Blocked "${file.name}" after ${nextAttempts} failures: ${info.message}`,
@@ -627,6 +641,7 @@ async function handleRetriableOrExhaustedFailure(env, page, item, file, info) {
     stmts.push(
       prepareEventStmt(env.DB, {
         pageId: page.id,
+        licenseId,
         level: 'error',
         eventType: 'post_failed_permanently',
         message: `Failed after ${nextAttempts} attempts: ${info.message}`,
@@ -714,6 +729,7 @@ async function reconcileStuckPostingItems(env, stuckItems, pagesById) {
         ).bind(matched.id, nowIso, item.id),
         prepareEventStmt(env.DB, {
           pageId: page.id,
+          licenseId: page.license_id ?? null,
           level: 'info',
           eventType: 'reconciled_posted',
           message: `Reconciled stuck posting item #${item.id} as posted (${matched.id})`,
@@ -728,6 +744,7 @@ async function reconcileStuckPostingItems(env, stuckItems, pagesById) {
         ).bind(item.id),
         prepareEventStmt(env.DB, {
           pageId: page.id,
+          licenseId: page.license_id ?? null,
           level: 'warn',
           eventType: 'reconciled_reset',
           message: `Reset stuck posting item #${item.id} back to pending`,
@@ -737,6 +754,17 @@ async function reconcileStuckPostingItems(env, stuckItems, pagesById) {
   }
 }
 
+function isPageLicenseRunnable(page, nowMs) {
+  if (page.license_id == null) return true;
+  if (page.license_status !== 'active') return false;
+  if (Number(page.license_global_pause) === 1) return false;
+  if (page.license_expires_at) {
+    const expMs = Date.parse(page.license_expires_at);
+    if (!Number.isNaN(expMs) && expMs <= nowMs) return false;
+  }
+  return true;
+}
+
 export async function runCron(env) {
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
@@ -744,12 +772,17 @@ export async function runCron(env) {
   const stuckCutoffIso = new Date(nowMs - STUCK_POSTING_MS).toISOString();
   const lookbackDate = new Date(nowMs - 48 * 3600_000).toISOString().slice(0, 10);
 
-  // Batch 1: read global pause, pages+accounts, recent/active plan rows, blocked files (4 queries)
+  // Batch 1: read global pause, pages+accounts+licenses, recent/active plan rows, blocked files (4 queries)
   const [settingsRes, pagesRes, planRes, blockedRes] = await env.DB.batch([
     env.DB.prepare(`SELECT value FROM settings WHERE key = 'global_pause'`),
     env.DB.prepare(
-      `SELECT p.*, a.status AS account_status
-       FROM pages p JOIN accounts a ON a.id = p.account_id`
+      `SELECT p.*, a.status AS account_status,
+              l.status AS license_status,
+              l.expires_at AS license_expires_at,
+              l.global_pause AS license_global_pause
+       FROM pages p
+       JOIN accounts a ON a.id = p.account_id
+       LEFT JOIN licenses l ON l.id = p.license_id`
     ),
     env.DB.prepare(
       `SELECT * FROM plan
@@ -766,7 +799,7 @@ export async function runCron(env) {
   const activePages = [];
   for (const p of allPages) {
     pagesById.set(p.id, p);
-    if (p.status === 'active' && p.account_status === 'active') {
+    if (p.status === 'active' && p.account_status === 'active' && isPageLicenseRunnable(p, nowMs)) {
       activePages.push(p);
     }
   }
@@ -847,7 +880,14 @@ export async function runCron(env) {
   for (const r of allPlans) {
     if (r.status !== 'pending') continue;
     const page = pagesById.get(r.page_id);
-    if (!page || page.status !== 'active' || page.account_status !== 'active') continue;
+    if (
+      !page ||
+      page.status !== 'active' ||
+      page.account_status !== 'active' ||
+      !isPageLicenseRunnable(page, nowMs)
+    ) {
+      continue;
+    }
     if (!page.captions_folder_id || !page.media_folder_id) continue;
 
     if (Number(r.attempts) === 0) {

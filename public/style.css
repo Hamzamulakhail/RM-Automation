@@ -698,7 +698,7 @@ a:hover { text-decoration: underline; }
   color: var(--amber);
   border-color: rgba(251, 191, 36, 0.25);
 }
-.badge-needs_attention, .badge-failed, .badge-revoked, .badge-error {
+.badge-needs_attention, .badge-failed, .badge-revoked, .badge-disabled, .badge-error {
   background: var(--rose-soft);
   color: var(--rose);
   border-color: rgba(251, 113, 133, 0.28);

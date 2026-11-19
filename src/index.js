@@ -2,16 +2,20 @@ import {
   constantTimeEqual,
   decryptText,
   encryptText,
+  sha256Hex,
   signToken,
   verifyToken,
 } from './crypto.js';
 import { ensureSchema, logEvent, prepareEventStmt } from './db.js';
-import { getServiceAccount, listSharedFolders } from './drive.js';
 import {
-  buildOAuthUrl,
-  exchangeCodeForLongLivedToken,
+  buildGoogleOAuthUrl,
+  exchangeGoogleCode,
+  getDriveConnectionInfo,
+  listSharedFolders,
+} from './drive.js';
+import {
   exchangeUserTokenForLongLived,
-  fetchMe,
+  fetchTokenIdentity,
   fetchUserPages,
 } from './facebook.js';
 import {
@@ -20,26 +24,10 @@ import {
   regenerateTodayPlanForPage,
   runCron,
 } from './scheduler.js';
-import {
-  INVITE_SESSION_COOKIE,
-  checkInviteRateLimit,
-  confirmInviteSelection,
-  createInvite,
-  createInviteSessionCookieValue,
-  getInviteSelectablePages,
-  isMetaDevModeAuthError,
-  listInvites,
-  lookupValidInvite,
-  lookupValidInviteById,
-  recordInviteBadHit,
-  renderInviteHtml,
-  revokeInvite,
-  verifyInviteSessionCookie,
-} from './invites.js';
 import { getLocalParts, isValidTimeZone, minutesToHHMM, parseSlotMinutes } from './timezone.js';
 
 const SESSION_COOKIE = 'pp_session';
-const OAUTH_STATE_COOKIE = 'pp_fb_state';
+const GOOGLE_STATE_COOKIE = 'pp_google_state';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
@@ -121,12 +109,8 @@ async function readJsonBody(request) {
   }
 }
 
-async function getAuthenticatedSession(request, env) {
-  if (!env.SESSION_SECRET) return null;
-  const cookies = parseCookies(request);
-  const token = cookies[SESSION_COOKIE];
-  if (!token) return null;
-  return verifyToken(token, env.SESSION_SECRET);
+function licenseScopeSql(col, licenseId) {
+  return licenseId != null ? { sql: `${col} = ?`, params: [licenseId] } : { sql: `${col} IS NULL`, params: [] };
 }
 
 function getClientIp(request) {
@@ -137,9 +121,60 @@ function getClientIp(request) {
   );
 }
 
+function generateLicenseKey() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const groups = [];
+  for (let g = 0; g < 4; g++) {
+    let seg = '';
+    for (let i = 0; i < 4; i++) {
+      seg += alphabet[bytes[g * 4 + i] % alphabet.length];
+    }
+    groups.push(seg);
+  }
+  return `RM-${groups.join('-')}`;
+}
+
+async function resolveAuthContext(request, env) {
+  if (!env.SESSION_SECRET) return null;
+  const cookies = parseCookies(request);
+  const token = cookies[SESSION_COOKIE];
+  if (!token) return null;
+  const payload = await verifyToken(token, env.SESSION_SECRET);
+  if (!payload) return null;
+
+  const role = payload.role || (payload.sub === 'admin' ? 'admin' : null);
+  if (role === 'admin') {
+    return { role: 'admin', licenseId: null, label: 'Super Admin', maxPages: null, license: null };
+  }
+
+  if (role === 'license' && payload.licenseId) {
+    const lic = await env.DB.prepare(
+      `SELECT id, label, max_pages, status, expires_at, global_pause, google_email
+       FROM licenses WHERE id = ?`
+    )
+      .bind(Number(payload.licenseId))
+      .first();
+    if (!lic || lic.status !== 'active') return null;
+    if (lic.expires_at) {
+      const expMs = Date.parse(lic.expires_at);
+      if (!Number.isNaN(expMs) && expMs <= Date.now()) return null;
+    }
+    return {
+      role: 'license',
+      licenseId: lic.id,
+      label: lic.label || `License #${lic.id}`,
+      maxPages: Number(lic.max_pages || 20),
+      license: lic,
+    };
+  }
+
+  return null;
+}
+
 async function handleLogin(request, env) {
-  if (!env.ADMIN_PASSWORD || !env.SESSION_SECRET) {
-    return errorResponse('ADMIN_PASSWORD or SESSION_SECRET secret is not configured', 503);
+  if (!env.SESSION_SECRET) {
+    return errorResponse('SESSION_SECRET secret is not configured', 503);
   }
 
   const ip = getClientIp(request);
@@ -163,10 +198,53 @@ async function handleLogin(request, env) {
   }
 
   const body = await readJsonBody(request);
-  const password = typeof body?.password === 'string' ? body.password : '';
-  const ok = await constantTimeEqual(password, env.ADMIN_PASSWORD);
+  const rawInput =
+    typeof body?.password === 'string'
+      ? body.password
+      : typeof body?.key === 'string'
+        ? body.key
+        : '';
+  const trimmedInput = rawInput.trim();
 
-  if (!ok) {
+  let auth = null;
+  let licenseRejectReason = null;
+
+  if (env.ADMIN_PASSWORD && rawInput && (await constantTimeEqual(rawInput, env.ADMIN_PASSWORD))) {
+    auth = { role: 'admin', licenseId: null, label: 'Super Admin', maxPages: null };
+  } else if (trimmedInput) {
+    const keyHash = await sha256Hex(trimmedInput);
+    const lic = await env.DB.prepare(
+      `SELECT id, label, max_pages, status, expires_at FROM licenses WHERE key_hash = ?`
+    )
+      .bind(keyHash)
+      .first();
+    if (lic) {
+      if (lic.status !== 'active') {
+        licenseRejectReason = 'This license key has been disabled.';
+      } else if (lic.expires_at && Date.parse(lic.expires_at) <= nowMs) {
+        licenseRejectReason = 'This license key has expired.';
+      } else {
+        auth = {
+          role: 'license',
+          licenseId: lic.id,
+          label: lic.label || `License #${lic.id}`,
+          maxPages: Number(lic.max_pages || 20),
+        };
+      }
+    }
+  }
+
+  if (licenseRejectReason) {
+    await logEvent(env.DB, {
+      level: 'warn',
+      eventType: 'license_login_rejected',
+      message: `${licenseRejectReason} (IP: ${ip})`,
+      details: { ip },
+    });
+    return errorResponse(licenseRejectReason, 403);
+  }
+
+  if (!auth) {
     const prevFailures =
       attemptRow?.locked_until && Date.parse(attemptRow.locked_until) <= nowMs
         ? 0
@@ -184,7 +262,7 @@ async function handleLogin(request, env) {
       prepareEventStmt(env.DB, {
         level: 'warn',
         eventType: 'login_failed',
-        message: `Failed admin login attempt (${nextFailures}/${LOGIN_MAX_FAILURES})`,
+        message: `Failed login attempt (${nextFailures}/${LOGIN_MAX_FAILURES})`,
         details: { ip },
       }),
     ]);
@@ -194,21 +272,28 @@ async function handleLogin(request, env) {
         retryAfterSeconds: Math.ceil(LOGIN_LOCKOUT_MS / 1000),
       });
     }
-    return errorResponse('Invalid password', 401);
+    return errorResponse('Invalid license key or admin password', 401);
   }
 
   const token = await signToken(
-    { sub: 'admin', iat: nowMs, exp: nowMs + SESSION_TTL_MS },
+    {
+      sub: auth.role,
+      role: auth.role,
+      licenseId: auth.licenseId,
+      iat: nowMs,
+      exp: nowMs + SESSION_TTL_MS,
+    },
     env.SESSION_SECRET
   );
 
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM login_attempts WHERE ip = ?`).bind(ip),
     prepareEventStmt(env.DB, {
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'login_success',
-      message: 'Admin logged in',
-      details: { ip },
+      message: auth.role === 'admin' ? 'Super Admin signed in' : `License "${auth.label}" signed in`,
+      details: { ip, role: auth.role },
     }),
   ]);
 
@@ -221,7 +306,17 @@ async function handleLogin(request, env) {
     partitioned,
   });
 
-  return jsonResponse({ ok: true }, 200, { 'Set-Cookie': cookie });
+  return jsonResponse(
+    {
+      ok: true,
+      role: auth.role,
+      licenseId: auth.licenseId,
+      label: auth.label,
+      maxPages: auth.maxPages,
+    },
+    200,
+    { 'Set-Cookie': cookie }
+  );
 }
 
 async function handleLogout(request, env) {
@@ -236,83 +331,41 @@ async function handleLogout(request, env) {
   return jsonResponse({ ok: true }, 200, { 'Set-Cookie': cookie });
 }
 
-async function handleFacebookStart(request, env) {
+async function handleGoogleStart(request, env) {
   const url = new URL(request.url);
-  const inviteToken = url.searchParams.get('invite');
+  const auth = await resolveAuthContext(request, env);
+  if (!auth) {
+    return Response.redirect(`${url.origin}/?google_error=unauthorized`, 302);
+  }
+
   const nowMs = Date.now();
   const nonceBytes = crypto.getRandomValues(new Uint8Array(16));
   const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
-  if (inviteToken) {
-    const ip = getClientIp(request);
-    const rate = await checkInviteRateLimit(env, ip);
-    if (!rate.allowed) {
-      return Response.redirect(`${url.origin}/invite/${encodeURIComponent(inviteToken)}?err=rate_limit`, 302);
-    }
-
-    const { valid, invite } = await lookupValidInvite(env, inviteToken);
-    if (!valid || !invite) {
-      await recordInviteBadHit(env, ip);
-      return Response.redirect(`${url.origin}/invite/${encodeURIComponent(inviteToken)}?err=invalid`, 302);
-    }
-
-    const state = await signToken(
-      { nonce, inviteId: invite.id, iat: nowMs, exp: nowMs + 10 * 60_000 },
-      env.SESSION_SECRET
-    );
-    const cookiePayload = await signToken(
-      { nonce, inviteId: invite.id, inviteToken, iat: nowMs, exp: nowMs + 10 * 60_000 },
-      env.SESSION_SECRET
-    );
-
-    let authUrl;
-    try {
-      authUrl = buildOAuthUrl(env, url.origin, state);
-    } catch (err) {
-      return Response.redirect(
-        `${url.origin}/invite/${encodeURIComponent(inviteToken)}?err=oauth_config`,
-        302
-      );
-    }
-
-    const stateCookie = makeCookieHeader(OAUTH_STATE_COOKIE, cookiePayload, {
-      maxAge: 600,
-      path: '/auth/facebook',
-      sameSite: 'Lax',
-      secure: isHttpsTransport(request, env),
-    });
-
-    return withSecurityHeaders(
-      new Response(null, {
-        status: 302,
-        headers: {
-          Location: authUrl,
-          'Set-Cookie': stateCookie,
-        },
-      })
-    );
-  }
-
-  const session = await getAuthenticatedSession(request, env);
-  if (!session) {
-    return Response.redirect(new URL('/?fb_error=unauthorized', request.url).toString(), 302);
-  }
-
-  const state = await signToken({ nonce, iat: nowMs, exp: nowMs + 10 * 60_000 }, env.SESSION_SECRET);
+  const state = await signToken(
+    {
+      nonce,
+      role: auth.role,
+      licenseId: auth.licenseId,
+      iat: nowMs,
+      exp: nowMs + 10 * 60_000,
+    },
+    env.SESSION_SECRET
+  );
 
   let authUrl;
   try {
-    authUrl = buildOAuthUrl(env, url.origin, state);
+    authUrl = buildGoogleOAuthUrl(env, url.origin, state);
   } catch (err) {
     return Response.redirect(
-      `${url.origin}/?tab=accounts&fb_error=${encodeURIComponent(err.message)}`,
+      `${url.origin}/?tab=accounts&google_error=${encodeURIComponent(err.message)}`,
       302
     );
   }
 
-  const stateCookie = makeCookieHeader(OAUTH_STATE_COOKIE, nonce, {
+  const stateCookie = makeCookieHeader(GOOGLE_STATE_COOKIE, nonce, {
     maxAge: 600,
-    path: '/auth/facebook',
+    path: '/auth/google',
     sameSite: 'Lax',
     secure: isHttpsTransport(request, env),
   });
@@ -328,181 +381,170 @@ async function handleFacebookStart(request, env) {
   );
 }
 
-async function handleFacebookCallback(request, env) {
+async function handleGoogleCallback(request, env) {
   const url = new URL(request.url);
   const origin = url.origin;
   const secureFlag = isHttpsTransport(request, env);
-  const clearStateCookie = makeCookieHeader(OAUTH_STATE_COOKIE, '', {
+  const clearStateCookie = makeCookieHeader(GOOGLE_STATE_COOKIE, '', {
     maxAge: 0,
-    path: '/auth/facebook',
+    path: '/auth/google',
     sameSite: 'Lax',
     secure: secureFlag,
   });
 
-  const code = url.searchParams.get('code');
-  const state = url.searchParams.get('state');
-  const cookies = parseCookies(request);
-  const rawStateCookie = cookies[OAUTH_STATE_COOKIE];
-
-  const verifiedState = state ? await verifyToken(state, env.SESSION_SECRET) : null;
-
-  // Check if this callback belongs to a public Invite flow
-  if (verifiedState?.inviteId) {
-    const cookiePayload = rawStateCookie ? await verifyToken(rawStateCookie, env.SESSION_SECRET) : null;
-    const inviteToken = cookiePayload?.inviteToken || '';
-    const redirectInviteErr = (errCode) =>
-      withSecurityHeaders(
-        new Response(null, {
-          status: 302,
-          headers: {
-            Location: inviteToken
-              ? `${origin}/invite/${encodeURIComponent(inviteToken)}?err=${encodeURIComponent(errCode)}`
-              : `${origin}/invite/invalid?err=${encodeURIComponent(errCode)}`,
-            'Set-Cookie': clearStateCookie,
-          },
-        })
-      );
-
-    if (
-      !cookiePayload ||
-      cookiePayload.nonce !== verifiedState.nonce ||
-      Number(cookiePayload.inviteId) !== Number(verifiedState.inviteId)
-    ) {
-      return redirectInviteErr('invalid');
-    }
-
-    const invite = await lookupValidInviteById(env, Number(verifiedState.inviteId));
-    if (!invite) {
-      return redirectInviteErr('invalid');
-    }
-
-    const fbErr = url.searchParams.get('error_description') || url.searchParams.get('error_message') || url.searchParams.get('error');
-    if (fbErr) {
-      return redirectInviteErr(isMetaDevModeAuthError(fbErr) ? 'dev_mode' : 'oauth_failed');
-    }
-    if (!code) {
-      return redirectInviteErr('oauth_failed');
-    }
-
-    try {
-      const { accessToken, expiresIn } = await exchangeCodeForLongLivedToken(env, origin, code);
-      const me = await fetchMe(env, accessToken);
-      const inviteCookieVal = await createInviteSessionCookieValue(env, {
-        inviteId: invite.id,
-        fbUserId: me.id,
-        fbUserName: me.name,
-        accessToken,
-        expiresIn,
-      });
-
-      const inviteSessionCookie = makeCookieHeader(INVITE_SESSION_COOKIE, inviteCookieVal, {
-        maxAge: 900,
-        path: '/',
-        sameSite: 'Lax',
-        secure: secureFlag,
-      });
-
-      const headers = new Headers({
-        Location: `${origin}/invite/${encodeURIComponent(inviteToken)}?step=select`,
-      });
-      headers.append('Set-Cookie', clearStateCookie);
-      headers.append('Set-Cookie', inviteSessionCookie);
-
-      return withSecurityHeaders(new Response(null, { status: 302, headers }));
-    } catch (err) {
-      await logEvent(env.DB, {
-        level: 'error',
-        eventType: 'invite_oauth_failed',
-        message: `Invite OAuth callback failed for invite #${invite.id}: ${err.message}`,
-      });
-      return redirectInviteErr(isMetaDevModeAuthError(err.message) ? 'dev_mode' : 'oauth_failed');
-    }
-  }
-
-  // Standard Admin OAuth Flow
   const redirectErr = (msg) =>
     withSecurityHeaders(
       new Response(null, {
         status: 302,
         headers: {
-          Location: `${origin}/?tab=accounts&fb_error=${encodeURIComponent(msg)}`,
+          Location: `${origin}/?tab=accounts&google_error=${encodeURIComponent(msg)}`,
           'Set-Cookie': clearStateCookie,
         },
       })
     );
 
-  const session = await getAuthenticatedSession(request, env);
-  if (!session) {
-    return redirectErr('Admin session required before connecting Facebook.');
+  const googleErr = url.searchParams.get('error_description') || url.searchParams.get('error');
+  if (googleErr) {
+    return redirectErr(googleErr);
   }
 
-  const fbErr = url.searchParams.get('error_description') || url.searchParams.get('error');
-  if (fbErr) {
-    return redirectErr(fbErr);
-  }
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const cookies = parseCookies(request);
+  const rawStateCookie = cookies[GOOGLE_STATE_COOKIE];
 
+  const verifiedState = state && env.SESSION_SECRET ? await verifyToken(state, env.SESSION_SECRET) : null;
   if (!code || !verifiedState || !rawStateCookie || verifiedState.nonce !== rawStateCookie) {
-    return redirectErr('Invalid or expired OAuth state. Please try connecting again.');
+    return redirectErr('Invalid or expired Google OAuth state. Please try connecting again.');
+  }
+
+  const targetLicenseId = verifiedState.role === 'license' && verifiedState.licenseId ? Number(verifiedState.licenseId) : null;
+  if (verifiedState.role === 'license') {
+    if (!targetLicenseId) {
+      return redirectErr('Invalid license workspace in OAuth state.');
+    }
+    const licRow = await env.DB.prepare(`SELECT id, status, expires_at FROM licenses WHERE id = ?`)
+      .bind(targetLicenseId)
+      .first();
+    if (!licRow || licRow.status !== 'active' || (licRow.expires_at && Date.parse(licRow.expires_at) <= Date.now())) {
+      return redirectErr('License is inactive or expired.');
+    }
   }
 
   try {
-    const { accessToken, expiresIn } = await exchangeCodeForLongLivedToken(env, origin, code);
-    const me = await fetchMe(env, accessToken);
-    const encrypted = await encryptText(accessToken, env.ENCRYPTION_KEY);
+    const exchanged = await exchangeGoogleCode(env, origin, code);
     const nowIso = new Date().toISOString();
-    const expiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
+    let encryptedRefresh = null;
 
-    await env.DB.prepare(
-      `INSERT INTO accounts (fb_user_id, name, encrypted_token, token_expires_at, status, last_error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'active', NULL, ?, ?)
-       ON CONFLICT(fb_user_id) DO UPDATE SET
-         name = excluded.name,
-         encrypted_token = excluded.encrypted_token,
-         token_expires_at = excluded.token_expires_at,
-         status = 'active',
-         last_error = NULL,
-         updated_at = excluded.updated_at`
-    )
-      .bind(me.id, me.name, encrypted, expiresAt, nowIso, nowIso)
-      .run();
+    if (exchanged.refreshToken) {
+      encryptedRefresh = await encryptText(exchanged.refreshToken, env.ENCRYPTION_KEY);
+    } else {
+      // Ensure we already have a refresh token stored for this workspace
+      if (targetLicenseId) {
+        const existing = await env.DB.prepare(
+          `SELECT google_encrypted_refresh_token FROM licenses WHERE id = ?`
+        )
+          .bind(targetLicenseId)
+          .first();
+        if (!existing?.google_encrypted_refresh_token) {
+          throw new Error(
+            'Google did not return an offline refresh token. Remove app access in Google Security Settings and sign in again.'
+          );
+        }
+      } else {
+        const existing = await env.DB.prepare(
+          `SELECT value FROM settings WHERE key = 'google_oauth_refresh_token'`
+        ).first();
+        if (!existing?.value) {
+          throw new Error(
+            'Google did not return an offline refresh token. Remove app access in Google Security Settings and sign in again.'
+          );
+        }
+      }
+    }
 
-    const accountRow = await env.DB.prepare(`SELECT id FROM accounts WHERE fb_user_id = ?`)
-      .bind(me.id)
-      .first();
+    const encryptedAccess = await encryptText(exchanged.accessToken, env.ENCRYPTION_KEY);
+    const accessExpiresAt = Date.now() + Math.max(300_000, (Number(exchanged.expiresIn || 3600) - 600) * 1000);
+    const cacheKey = `google_oauth:${targetLicenseId ? String(targetLicenseId) : 'admin'}`;
 
-    await logEvent(env.DB, {
-      level: 'info',
-      eventType: 'account_connected',
-      message: `Connected Facebook account ${me.name} (${me.id}) via OAuth`,
-      details: { accountId: accountRow?.id, fbUserId: me.id },
-    });
+    const stmts = [
+      env.DB.prepare(
+        `INSERT INTO cached_tokens (cache_key, token, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(cache_key) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at`
+      ).bind(cacheKey, encryptedAccess, accessExpiresAt),
+      prepareEventStmt(env.DB, {
+        licenseId: targetLicenseId,
+        level: 'info',
+        eventType: 'google_drive_connected',
+        message: `Connected Google Drive (${exchanged.email})`,
+        details: { email: exchanged.email },
+      }),
+    ];
+
+    if (targetLicenseId) {
+      stmts.unshift(
+        env.DB.prepare(
+          `UPDATE licenses
+           SET google_email = ?,
+               google_encrypted_refresh_token = COALESCE(?, google_encrypted_refresh_token),
+               google_connected_at = ?,
+               updated_at = ?
+           WHERE id = ?`
+        ).bind(exchanged.email, encryptedRefresh, nowIso, nowIso, targetLicenseId)
+      );
+    } else {
+      stmts.unshift(
+        env.DB.prepare(
+          `INSERT INTO settings (key, value) VALUES ('google_oauth_email', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+        ).bind(exchanged.email),
+        env.DB.prepare(
+          `INSERT INTO settings (key, value) VALUES ('google_oauth_connected_at', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+        ).bind(nowIso)
+      );
+      if (encryptedRefresh) {
+        stmts.unshift(
+          env.DB.prepare(
+            `INSERT INTO settings (key, value) VALUES ('google_oauth_refresh_token', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+          ).bind(encryptedRefresh)
+        );
+      }
+    }
+
+    await env.DB.batch(stmts);
 
     return withSecurityHeaders(
       new Response(null, {
         status: 302,
         headers: {
-          Location: `${origin}/?tab=accounts&connected_account=${encodeURIComponent(String(accountRow?.id || ''))}`,
+          Location: `${origin}/?tab=accounts&google_connected=1`,
           'Set-Cookie': clearStateCookie,
         },
       })
     );
   } catch (err) {
     await logEvent(env.DB, {
+      licenseId: targetLicenseId,
       level: 'error',
-      eventType: 'fb_oauth_failed',
-      message: `Facebook OAuth callback failed: ${err.message}`,
+      eventType: 'google_drive_failed',
+      message: `Google Drive OAuth callback failed: ${err.message}`,
     });
     return redirectErr(err.message);
   }
 }
 
-async function handleDashboard(env) {
+async function handleDashboard(env, auth) {
   const nowMs = Date.now();
   const sparkDates = [];
   for (let i = 6; i >= 0; i--) {
     sparkDates.push(new Date(nowMs - i * 24 * 3600_000).toISOString().slice(0, 10));
   }
   const lookbackDate = sparkDates[0];
+
+  const pageScope = licenseScopeSql('p.license_id', auth.licenseId);
+  const accScope = licenseScopeSql('license_id', auth.licenseId);
 
   const [settingsRes, pagesRes, planRes, blockedRes, accountsRes] = await env.DB.batch([
     env.DB.prepare(`SELECT value FROM settings WHERE key = 'global_pause'`),
@@ -514,25 +556,38 @@ async function handleDashboard(env) {
          p.timezone, p.slots, p.jitter_minutes, p.daily_cap,
          p.min_gap_minutes, p.ramp_up_enabled, p.ramp_start, p.ramp_step_days,
          p.status, p.last_error, p.created_at, p.updated_at,
-         a.name AS account_name, a.status AS account_status
+         a.name AS account_name, a.status AS account_status, a.token_kind AS account_token_kind
        FROM pages p
        JOIN accounts a ON a.id = p.account_id
+       WHERE ${pageScope.sql}
        ORDER BY p.name ASC`
-    ),
+    ).bind(...pageScope.params),
     env.DB.prepare(
-      `SELECT id, page_id, local_date, slot_time, planned_local, planned_utc,
-              status, attempts, next_attempt_utc, fb_post_id, file_name, caption_number,
-              substr(caption_text, 1, 140) AS caption_preview,
-              error, finished_at, cleanup_pending
-       FROM plan
-       WHERE local_date >= ?
-       ORDER BY planned_utc ASC`
-    ).bind(lookbackDate),
-    env.DB.prepare(`SELECT page_id, COUNT(*) AS cnt FROM blocked_files GROUP BY page_id`),
-    env.DB.prepare(`SELECT id, name, status, last_error FROM accounts`),
+      `SELECT pl.id, pl.page_id, pl.local_date, pl.slot_time, pl.planned_local, pl.planned_utc,
+              pl.status, pl.attempts, pl.next_attempt_utc, pl.fb_post_id, pl.file_name, pl.caption_number,
+              substr(pl.caption_text, 1, 140) AS caption_preview,
+              pl.error, pl.finished_at, pl.cleanup_pending
+       FROM plan pl
+       JOIN pages p ON p.id = pl.page_id
+       WHERE ${pageScope.sql} AND pl.local_date >= ?
+       ORDER BY pl.planned_utc ASC`
+    ).bind(...pageScope.params, lookbackDate),
+    env.DB.prepare(
+      `SELECT bf.page_id, COUNT(*) AS cnt
+       FROM blocked_files bf
+       JOIN pages p ON p.id = bf.page_id
+       WHERE ${pageScope.sql}
+       GROUP BY bf.page_id`
+    ).bind(...pageScope.params),
+    env.DB.prepare(
+      `SELECT id, name, status, last_error, token_kind FROM accounts WHERE ${accScope.sql}`
+    ).bind(...accScope.params),
   ]);
 
-  const globalPause = settingsRes.results?.[0]?.value === '1';
+  const ownerGlobalPause = settingsRes.results?.[0]?.value === '1';
+  const licenseGlobalPause = auth.license ? Number(auth.license.global_pause) === 1 : false;
+  const globalPause = auth.role === 'license' ? licenseGlobalPause : ownerGlobalPause;
+
   const blockedMap = new Map();
   for (const row of blockedRes.results || []) {
     blockedMap.set(row.page_id, Number(row.cnt));
@@ -591,6 +646,7 @@ async function handleDashboard(env) {
 
   return jsonResponse({
     globalPause,
+    ownerGlobalPause: auth.role === 'license' ? ownerGlobalPause : false,
     nowUtc: new Date(nowMs).toISOString(),
     pages,
     needsAttentionCount: needsAttentionPages.length,
@@ -604,100 +660,213 @@ async function handleDashboard(env) {
   });
 }
 
-async function handleListAccounts(env) {
+async function handleListAccounts(env, auth) {
+  const scope = licenseScopeSql('a.license_id', auth.licenseId);
   const res = await env.DB.prepare(
-    `SELECT a.id, a.fb_user_id, a.name, a.token_expires_at, a.status, a.last_error,
+    `SELECT a.id, a.fb_user_id, a.name, a.token_kind, a.token_expires_at, a.status, a.last_error,
             a.created_at, a.updated_at, COUNT(p.id) AS page_count
      FROM accounts a
      LEFT JOIN pages p ON p.account_id = a.id
+     WHERE ${scope.sql}
      GROUP BY a.id
      ORDER BY a.created_at DESC`
-  ).all();
+  )
+    .bind(...scope.params)
+    .all();
 
   return jsonResponse({ accounts: res.results || [] });
 }
 
-async function handleManualAccount(request, env) {
+async function handleManualAccount(request, env, auth) {
   const body = await readJsonBody(request);
   const rawToken = typeof body?.token === 'string' ? body.token.trim() : '';
+  const mode = body?.mode === 'page' ? 'page' : 'user';
   if (!rawToken) {
     return errorResponse('Access token is required', 400);
   }
 
   let finalToken = rawToken;
   let expiresIn = null;
-  if (env.META_APP_ID && env.META_APP_SECRET) {
+
+  if (mode === 'user' && env.META_APP_ID && env.META_APP_SECRET) {
     try {
       const exchanged = await exchangeUserTokenForLongLived(env, rawToken);
       finalToken = exchanged.accessToken;
       expiresIn = exchanged.expiresIn;
     } catch {
-      // Keep pasted token directly if already long-lived or exchange not applicable
+      // Keep pasted token directly if already long-lived or exchange is not applicable
     }
   }
 
-  let me;
+  let identity;
   try {
-    me = await fetchMe(env, finalToken);
+    identity = await fetchTokenIdentity(env, finalToken, mode);
   } catch (err) {
     return errorResponse(`Facebook token verification failed: ${err.message}`, 400);
   }
 
-  const encrypted = await encryptText(finalToken, env.ENCRYPTION_KEY);
   const nowIso = new Date().toISOString();
+  const encrypted = await encryptText(finalToken, env.ENCRYPTION_KEY);
+
+  if (mode === 'page') {
+    const existingPage = await env.DB.prepare(`SELECT id, license_id FROM pages WHERE fb_page_id = ?`)
+      .bind(identity.id)
+      .first();
+
+    if (existingPage && (existingPage.license_id ?? null) !== (auth.licenseId ?? null)) {
+      return errorResponse('This Facebook Page is already connected under another license.', 409);
+    }
+
+    if (!existingPage && auth.role === 'license') {
+      const cntRow = await env.DB.prepare(`SELECT COUNT(*) AS cnt FROM pages WHERE license_id = ?`)
+        .bind(auth.licenseId)
+        .first();
+      if (Number(cntRow?.cnt || 0) >= auth.maxPages) {
+        return errorResponse(
+          `License page limit reached (${auth.maxPages}). Ask the administrator to increase your limit.`,
+          403
+        );
+      }
+    }
+
+    const syntheticAccId = `lic${auth.licenseId || 0}:page:${identity.id}`;
+    await env.DB.prepare(
+      `INSERT INTO accounts (fb_user_id, license_id, token_kind, name, encrypted_token, token_expires_at, status, last_error, created_at, updated_at)
+       VALUES (?, ?, 'page_direct', ?, ?, NULL, 'active', NULL, ?, ?)
+       ON CONFLICT(fb_user_id) DO UPDATE SET
+         name = excluded.name,
+         token_kind = 'page_direct',
+         encrypted_token = excluded.encrypted_token,
+         status = 'active',
+         last_error = NULL,
+         updated_at = excluded.updated_at`
+    )
+      .bind(syntheticAccId, auth.licenseId, identity.name, encrypted, nowIso, nowIso)
+      .run();
+
+    const account = await env.DB.prepare(
+      `SELECT id, fb_user_id, name, token_kind, token_expires_at, status, last_error, created_at, updated_at
+       FROM accounts WHERE fb_user_id = ?`
+    )
+      .bind(syntheticAccId)
+      .first();
+
+    await env.DB.prepare(
+      `INSERT INTO pages (account_id, license_id, fb_page_id, name, encrypted_page_token, status, last_error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?)
+       ON CONFLICT(fb_page_id) DO UPDATE SET
+         account_id = excluded.account_id,
+         name = excluded.name,
+         encrypted_page_token = excluded.encrypted_page_token,
+         status = CASE WHEN pages.status = 'needs_attention' THEN 'active' ELSE pages.status END,
+         last_error = NULL,
+         updated_at = excluded.updated_at`
+    )
+      .bind(account.id, auth.licenseId, identity.id, identity.name, encrypted, nowIso, nowIso)
+      .run();
+
+    const page = await env.DB.prepare(
+      `SELECT id, account_id, fb_page_id, name, status FROM pages WHERE fb_page_id = ?`
+    )
+      .bind(identity.id)
+      .first();
+
+    await logEvent(env.DB, {
+      pageId: page?.id || null,
+      licenseId: auth.licenseId,
+      level: 'info',
+      eventType: 'fb_page_token_connected',
+      message: `Connected single Page "${identity.name}" (${identity.id}) via Page token`,
+      details: { accountId: account?.id, fbPageId: identity.id },
+    });
+
+    return jsonResponse({ mode: 'page', account, page });
+  }
+
+  // Mode 1: Account / User Token (fetches all Pages via /me/accounts)
+  try {
+    await fetchUserPages(env, finalToken);
+  } catch (err) {
+    return errorResponse(err.message, 400);
+  }
+
+  const existingAcc = await env.DB.prepare(`SELECT id, license_id FROM accounts WHERE fb_user_id = ?`)
+    .bind(identity.id)
+    .first();
+  if (existingAcc && (existingAcc.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return errorResponse('This Facebook account is already connected under another license.', 409);
+  }
+
   const expiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
 
   await env.DB.prepare(
-    `INSERT INTO accounts (fb_user_id, name, encrypted_token, token_expires_at, status, last_error, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'active', NULL, ?, ?)
+    `INSERT INTO accounts (fb_user_id, license_id, token_kind, name, encrypted_token, token_expires_at, status, last_error, created_at, updated_at)
+     VALUES (?, ?, 'user', ?, ?, ?, 'active', NULL, ?, ?)
      ON CONFLICT(fb_user_id) DO UPDATE SET
        name = excluded.name,
+       token_kind = 'user',
        encrypted_token = excluded.encrypted_token,
        token_expires_at = COALESCE(excluded.token_expires_at, accounts.token_expires_at),
        status = 'active',
        last_error = NULL,
        updated_at = excluded.updated_at`
   )
-    .bind(me.id, me.name, encrypted, expiresAt, nowIso, nowIso)
+    .bind(identity.id, auth.licenseId, identity.name, encrypted, expiresAt, nowIso, nowIso)
     .run();
 
   const account = await env.DB.prepare(
-    `SELECT id, fb_user_id, name, token_expires_at, status, last_error, created_at, updated_at
+    `SELECT id, fb_user_id, name, token_kind, token_expires_at, status, last_error, created_at, updated_at
      FROM accounts WHERE fb_user_id = ?`
   )
-    .bind(me.id)
+    .bind(identity.id)
     .first();
 
   await logEvent(env.DB, {
+    licenseId: auth.licenseId,
     level: 'info',
     eventType: 'fb_account_manual',
-    message: `Connected Facebook account ${me.name} (${me.id}) via token`,
+    message: `Connected Facebook account "${identity.name}" (${identity.id}) via User token`,
     details: { accountId: account?.id },
   });
 
-  return jsonResponse({ account });
+  return jsonResponse({ mode: 'user', account });
 }
 
-async function handleCheckAccount(env, accountId) {
+async function handleCheckAccount(env, auth, accountId) {
   const row = await env.DB.prepare(`SELECT * FROM accounts WHERE id = ?`).bind(accountId).first();
-  if (!row) return errorResponse('Account not found', 404);
+  if (!row || (row.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return errorResponse('Account not found', 404);
+  }
 
   const nowIso = new Date().toISOString();
   try {
     const token = await decryptText(row.encrypted_token, env.ENCRYPTION_KEY);
-    const me = await fetchMe(env, token);
-    await env.DB.prepare(
-      `UPDATE accounts SET name = ?, status = 'active', last_error = NULL, updated_at = ? WHERE id = ?`
-    )
-      .bind(me.name, nowIso, accountId)
-      .run();
-    return jsonResponse({ ok: true, status: 'active', name: me.name });
+    const kind = row.token_kind === 'page_direct' ? 'page' : 'user';
+    const identity = await fetchTokenIdentity(env, token, kind);
+
+    const stmts = [
+      env.DB.prepare(
+        `UPDATE accounts SET name = ?, status = 'active', last_error = NULL, updated_at = ? WHERE id = ?`
+      ).bind(identity.name, nowIso, accountId),
+    ];
+    if (kind === 'page') {
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE pages SET status = CASE WHEN status = 'needs_attention' THEN 'active' ELSE status END,
+                           last_error = NULL, updated_at = ?
+           WHERE account_id = ?`
+        ).bind(nowIso, accountId)
+      );
+    }
+    await env.DB.batch(stmts);
+    return jsonResponse({ ok: true, status: 'active', name: identity.name });
   } catch (err) {
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE accounts SET status = 'needs_attention', last_error = ?, updated_at = ? WHERE id = ?`
       ).bind(err.message, nowIso, accountId),
       prepareEventStmt(env.DB, {
+        licenseId: auth.licenseId,
         level: 'error',
         eventType: 'account_token_check_failed',
         message: `Account ${row.name} token health check failed: ${err.message}`,
@@ -707,14 +876,37 @@ async function handleCheckAccount(env, accountId) {
   }
 }
 
-async function handleAccountFbPages(env, accountId) {
+async function handleAccountFbPages(env, auth, accountId) {
   const row = await env.DB.prepare(`SELECT * FROM accounts WHERE id = ?`).bind(accountId).first();
-  if (!row) return errorResponse('Account not found', 404);
+  if (!row || (row.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return errorResponse('Account not found', 404);
+  }
 
   try {
     const token = await decryptText(row.encrypted_token, env.ENCRYPTION_KEY);
+    if (row.token_kind === 'page_direct') {
+      const pageInfo = await fetchTokenIdentity(env, token, 'page');
+      const existingPage = await env.DB.prepare(`SELECT id FROM pages WHERE fb_page_id = ? AND account_id = ?`)
+        .bind(pageInfo.id, accountId)
+        .first();
+      return jsonResponse({
+        pages: [
+          {
+            fb_page_id: pageInfo.id,
+            name: pageInfo.name,
+            tasks: [],
+            alreadyAdded: Boolean(existingPage),
+            existingPageId: existingPage?.id || null,
+          },
+        ],
+      });
+    }
+
     const fbPages = await fetchUserPages(env, token);
-    const existingRes = await env.DB.prepare(`SELECT id, fb_page_id FROM pages`).all();
+    const scope = licenseScopeSql('license_id', auth.licenseId);
+    const existingRes = await env.DB.prepare(`SELECT id, fb_page_id FROM pages WHERE ${scope.sql}`)
+      .bind(...scope.params)
+      .all();
     const existingMap = new Map();
     for (const p of existingRes.results || []) {
       existingMap.set(p.fb_page_id, p.id);
@@ -734,9 +926,11 @@ async function handleAccountFbPages(env, accountId) {
   }
 }
 
-async function handleAddAccountPages(request, env, accountId) {
+async function handleAddAccountPages(request, env, auth, accountId) {
   const account = await env.DB.prepare(`SELECT * FROM accounts WHERE id = ?`).bind(accountId).first();
-  if (!account) return errorResponse('Account not found', 404);
+  if (!account || (account.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return errorResponse('Account not found', 404);
+  }
 
   const body = await readJsonBody(request);
   const selectedIds = Array.isArray(body?.fbPageIds) ? body.fbPageIds.map(String) : [];
@@ -746,11 +940,48 @@ async function handleAddAccountPages(request, env, accountId) {
 
   const selectedSet = new Set(selectedIds);
   const userToken = await decryptText(account.encrypted_token, env.ENCRYPTION_KEY);
-  const fbPages = await fetchUserPages(env, userToken);
-  const matched = fbPages.filter((p) => selectedSet.has(p.id));
+
+  let matched = [];
+  if (account.token_kind === 'page_direct') {
+    const pageInfo = await fetchTokenIdentity(env, userToken, 'page');
+    if (selectedSet.has(pageInfo.id)) {
+      matched = [{ id: pageInfo.id, name: pageInfo.name, access_token: userToken }];
+    }
+  } else {
+    const fbPages = await fetchUserPages(env, userToken);
+    matched = fbPages.filter((p) => selectedSet.has(p.id));
+  }
 
   if (matched.length === 0) {
     return errorResponse('None of the selected Pages were returned by Facebook', 400);
+  }
+
+  // Check ownership conflicts across licenses & count new pages against maxPages
+  let newAdditions = 0;
+  for (const p of matched) {
+    const existing = await env.DB.prepare(`SELECT id, license_id FROM pages WHERE fb_page_id = ?`)
+      .bind(p.id)
+      .first();
+    if (existing) {
+      if ((existing.license_id ?? null) !== (auth.licenseId ?? null)) {
+        return errorResponse(`Page "${p.name}" is already connected under another license.`, 409);
+      }
+    } else {
+      newAdditions++;
+    }
+  }
+
+  if (auth.role === 'license' && newAdditions > 0) {
+    const cntRow = await env.DB.prepare(`SELECT COUNT(*) AS cnt FROM pages WHERE license_id = ?`)
+      .bind(auth.licenseId)
+      .first();
+    const currentCount = Number(cntRow?.cnt || 0);
+    if (currentCount + newAdditions > auth.maxPages) {
+      return errorResponse(
+        `License limit allows max ${auth.maxPages} Page(s) (currently ${currentCount}).`,
+        403
+      );
+    }
   }
 
   const nowIso = new Date().toISOString();
@@ -759,8 +990,8 @@ async function handleAddAccountPages(request, env, accountId) {
     const encryptedPageToken = await encryptText(p.access_token, env.ENCRYPTION_KEY);
     stmts.push(
       env.DB.prepare(
-        `INSERT INTO pages (account_id, fb_page_id, name, encrypted_page_token, status, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'active', NULL, ?, ?)
+        `INSERT INTO pages (account_id, license_id, fb_page_id, name, encrypted_page_token, status, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?)
          ON CONFLICT(fb_page_id) DO UPDATE SET
            account_id = excluded.account_id,
            name = excluded.name,
@@ -768,11 +999,12 @@ async function handleAddAccountPages(request, env, accountId) {
            status = CASE WHEN pages.status = 'needs_attention' THEN 'active' ELSE pages.status END,
            last_error = NULL,
            updated_at = excluded.updated_at`
-      ).bind(account.id, p.id, p.name, encryptedPageToken, nowIso, nowIso)
+      ).bind(account.id, auth.licenseId, p.id, p.name, encryptedPageToken, nowIso, nowIso)
     );
   }
   stmts.push(
     prepareEventStmt(env.DB, {
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'pages_added',
       message: `Added/updated ${matched.length} Page(s) from account ${account.name}`,
@@ -784,13 +1016,18 @@ async function handleAddAccountPages(request, env, accountId) {
   return jsonResponse({ ok: true, addedCount: matched.length });
 }
 
-async function handleDeleteAccount(env, accountId) {
-  const row = await env.DB.prepare(`SELECT id, name FROM accounts WHERE id = ?`).bind(accountId).first();
-  if (!row) return errorResponse('Account not found', 404);
+async function handleDeleteAccount(env, auth, accountId) {
+  const row = await env.DB.prepare(`SELECT id, name, license_id FROM accounts WHERE id = ?`)
+    .bind(accountId)
+    .first();
+  if (!row || (row.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return errorResponse('Account not found', 404);
+  }
 
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM accounts WHERE id = ?`).bind(accountId),
     prepareEventStmt(env.DB, {
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'account_deleted',
       message: `Deleted Facebook account ${row.name}`,
@@ -799,32 +1036,66 @@ async function handleDeleteAccount(env, accountId) {
   return jsonResponse({ ok: true });
 }
 
-async function handleDriveInfo(env) {
-  try {
-    const sa = getServiceAccount(env);
-    return jsonResponse({
-      configured: true,
-      serviceAccountEmail: sa.client_email,
-    });
-  } catch (err) {
-    return jsonResponse({
-      configured: false,
-      serviceAccountEmail: null,
-      error: err.message,
-    });
-  }
+async function handleDriveInfo(env, auth) {
+  const info = await getDriveConnectionInfo(env, auth.licenseId);
+  return jsonResponse(info);
 }
 
-async function handleDriveFolders(env) {
+async function handleDriveFolders(env, auth) {
   try {
-    const folders = await listSharedFolders(env);
+    const folders = await listSharedFolders(env, auth.licenseId);
     return jsonResponse({ folders });
   } catch (err) {
     return errorResponse(err.message, 400);
   }
 }
 
-async function handleGetPage(env, pageId) {
+async function handleDriveDisconnect(env, auth) {
+  const nowIso = new Date().toISOString();
+  const cacheKey = `google_oauth:${auth.licenseId ? String(auth.licenseId) : 'admin'}`;
+  const stmts = [
+    env.DB.prepare(`DELETE FROM cached_tokens WHERE cache_key = ?`).bind(cacheKey),
+    prepareEventStmt(env.DB, {
+      licenseId: auth.licenseId,
+      level: 'info',
+      eventType: 'google_drive_disconnected',
+      message: 'Disconnected Google Drive account',
+    }),
+  ];
+
+  if (auth.licenseId) {
+    stmts.unshift(
+      env.DB.prepare(
+        `UPDATE licenses
+         SET google_email = NULL, google_encrypted_refresh_token = NULL, google_connected_at = NULL, updated_at = ?
+         WHERE id = ?`
+      ).bind(nowIso, auth.licenseId)
+    );
+  } else {
+    stmts.unshift(
+      env.DB.prepare(
+        `DELETE FROM settings WHERE key IN ('google_oauth_email', 'google_oauth_refresh_token', 'google_oauth_connected_at')`
+      )
+    );
+  }
+
+  await env.DB.batch(stmts);
+  const info = await getDriveConnectionInfo(env, auth.licenseId);
+  return jsonResponse(info);
+}
+
+async function verifyOwnedPage(env, auth, pageId) {
+  const page = await env.DB.prepare(`SELECT * FROM pages WHERE id = ?`).bind(pageId).first();
+  if (!page || (page.license_id ?? null) !== (auth.licenseId ?? null)) {
+    return null;
+  }
+  return page;
+}
+
+async function handleGetPage(env, auth, pageId) {
+  const owned = await verifyOwnedPage(env, auth, pageId);
+  if (!owned) return errorResponse('Page not found', 404);
+
   const [pageRes, blockedRes, recentPlansRes, recentEventsRes] = await env.DB.batch([
     env.DB.prepare(
       `SELECT p.id, p.account_id, p.fb_page_id, p.name,
@@ -837,9 +1108,9 @@ async function handleGetPage(env, pageId) {
        FROM pages p JOIN accounts a ON a.id = p.account_id
        WHERE p.id = ?`
     ).bind(pageId),
-    env.DB.prepare(`SELECT id, file_id, file_name, reason, attempts, created_at FROM blocked_files WHERE page_id = ?`).bind(
-      pageId
-    ),
+    env.DB.prepare(
+      `SELECT id, file_id, file_name, reason, attempts, created_at FROM blocked_files WHERE page_id = ?`
+    ).bind(pageId),
     env.DB.prepare(
       `SELECT id, local_date, slot_time, planned_local, planned_utc, status, attempts, fb_post_id, file_name, caption_number, error, finished_at
        FROM plan WHERE page_id = ? ORDER BY id DESC LIMIT 30`
@@ -871,8 +1142,8 @@ async function handleGetPage(env, pageId) {
   });
 }
 
-async function handleUpdatePage(request, env, pageId) {
-  const existing = await env.DB.prepare(`SELECT * FROM pages WHERE id = ?`).bind(pageId).first();
+async function handleUpdatePage(request, env, auth, pageId) {
+  const existing = await verifyOwnedPage(env, auth, pageId);
   if (!existing) return errorResponse('Page not found', 404);
 
   const body = await readJsonBody(request);
@@ -959,6 +1230,7 @@ async function handleUpdatePage(request, env, pageId) {
     ),
     prepareEventStmt(env.DB, {
       pageId,
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'page_updated',
       message: `Updated settings for Page "${name}"`,
@@ -973,13 +1245,14 @@ async function handleUpdatePage(request, env, pageId) {
   return jsonResponse({ ok: true });
 }
 
-async function handleDeletePage(env, pageId) {
-  const row = await env.DB.prepare(`SELECT id, name FROM pages WHERE id = ?`).bind(pageId).first();
+async function handleDeletePage(env, auth, pageId) {
+  const row = await verifyOwnedPage(env, auth, pageId);
   if (!row) return errorResponse('Page not found', 404);
 
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM pages WHERE id = ?`).bind(pageId),
     prepareEventStmt(env.DB, {
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'page_deleted',
       message: `Deleted Page "${row.name}"`,
@@ -988,8 +1261,8 @@ async function handleDeletePage(env, pageId) {
   return jsonResponse({ ok: true });
 }
 
-async function handlePausePage(request, env, pageId) {
-  const page = await env.DB.prepare(`SELECT * FROM pages WHERE id = ?`).bind(pageId).first();
+async function handlePausePage(request, env, auth, pageId) {
+  const page = await verifyOwnedPage(env, auth, pageId);
   if (!page) return errorResponse('Page not found', 404);
 
   const body = await readJsonBody(request);
@@ -1002,6 +1275,7 @@ async function handlePausePage(request, env, pageId) {
     ).bind(nextStatus, nextStatus, nowIso, pageId),
     prepareEventStmt(env.DB, {
       pageId,
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: nextStatus === 'paused' ? 'page_paused' : 'page_resumed',
       message: `Page "${page.name}" ${nextStatus === 'paused' ? 'paused' : 'resumed'}`,
@@ -1024,8 +1298,8 @@ async function handlePausePage(request, env, pageId) {
   return jsonResponse({ ok: true, status: nextStatus });
 }
 
-async function handleRetryFailed(env, pageId) {
-  const page = await env.DB.prepare(`SELECT * FROM pages WHERE id = ?`).bind(pageId).first();
+async function handleRetryFailed(env, auth, pageId) {
+  const page = await verifyOwnedPage(env, auth, pageId);
   if (!page) return errorResponse('Page not found', 404);
 
   const localDate = getLocalParts(Date.now(), page.timezone).localDate;
@@ -1046,6 +1320,7 @@ async function handleRetryFailed(env, pageId) {
     ).bind(nowIso, pageId),
     prepareEventStmt(env.DB, {
       pageId,
+      licenseId: auth.licenseId,
       level: 'info',
       eventType: 'retry_failed_requested',
       message: `Reset failed slots for "${page.name}" to pending`,
@@ -1055,7 +1330,10 @@ async function handleRetryFailed(env, pageId) {
   return jsonResponse({ ok: true, resetCount: res[0]?.meta?.changes || 0 });
 }
 
-async function handleUnblockFiles(request, env, pageId) {
+async function handleUnblockFiles(request, env, auth, pageId) {
+  const page = await verifyOwnedPage(env, auth, pageId);
+  if (!page) return errorResponse('Page not found', 404);
+
   const body = await readJsonBody(request);
   const fileId = typeof body?.fileId === 'string' && body.fileId ? body.fileId : null;
 
@@ -1065,6 +1343,7 @@ async function handleUnblockFiles(request, env, pageId) {
       env.DB.prepare(`DELETE FROM blocked_files WHERE page_id = ? AND file_id = ?`).bind(pageId, fileId),
       prepareEventStmt(env.DB, {
         pageId,
+        licenseId: auth.licenseId,
         level: 'info',
         eventType: 'file_unblocked',
         message: `Unblocked file ${fileId}`,
@@ -1075,6 +1354,7 @@ async function handleUnblockFiles(request, env, pageId) {
       env.DB.prepare(`DELETE FROM blocked_files WHERE page_id = ?`).bind(pageId),
       prepareEventStmt(env.DB, {
         pageId,
+        licenseId: auth.licenseId,
         level: 'info',
         eventType: 'all_files_unblocked',
         message: `Unblocked all blocked files for Page #${pageId}`,
@@ -1084,15 +1364,16 @@ async function handleUnblockFiles(request, env, pageId) {
   return jsonResponse({ ok: true, unblockedCount: res[0]?.meta?.changes || 0 });
 }
 
-async function handleEvents(request, env) {
+async function handleEvents(request, env, auth) {
   const url = new URL(request.url);
   const pageId = url.searchParams.get('pageId');
   const level = url.searchParams.get('level');
   const date = url.searchParams.get('date');
   const limit = Math.min(200, Math.max(10, Number(url.searchParams.get('limit') || 100)));
 
-  const where = [];
-  const params = [];
+  const scope = licenseScopeSql('e.license_id', auth.licenseId);
+  const where = [scope.sql];
+  const params = [...scope.params];
 
   if (pageId && /^\d+$/.test(pageId)) {
     where.push('e.page_id = ?');
@@ -1124,6 +1405,128 @@ async function handleEvents(request, env) {
   return jsonResponse({ events: res.results || [] });
 }
 
+// --- Super Admin License Management ---
+
+async function handleListLicenses(env) {
+  const res = await env.DB.prepare(
+    `SELECT l.id, l.key_prefix, l.label, l.max_pages, l.status, l.expires_at, l.global_pause,
+            l.google_email, l.google_connected_at, l.created_at, l.updated_at,
+            (SELECT COUNT(*) FROM accounts a WHERE a.license_id = l.id) AS account_count,
+            (SELECT COUNT(*) FROM pages p WHERE p.license_id = l.id) AS page_count
+     FROM licenses l
+     ORDER BY l.id DESC`
+  ).all();
+  return jsonResponse({ licenses: res.results || [] });
+}
+
+async function handleCreateLicense(request, env) {
+  const body = await readJsonBody(request);
+  const label = typeof body?.label === 'string' ? body.label.trim().slice(0, 120) : '';
+  const maxPages = Math.max(1, Math.min(500, Math.round(Number(body?.maxPages ?? 20))));
+  const expiresDaysRaw = body?.expiresDays;
+  const expiresDays =
+    expiresDaysRaw != null && Number(expiresDaysRaw) > 0
+      ? Math.min(3650, Math.round(Number(expiresDaysRaw)))
+      : null;
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiresAt = expiresDays ? new Date(nowMs + expiresDays * 86400_000).toISOString() : null;
+
+  const rawKey = generateLicenseKey();
+  const keyHash = await sha256Hex(rawKey);
+  const keyPrefix = `${rawKey.slice(0, 7)}••••${rawKey.slice(-4)}`;
+
+  const insertRes = await env.DB.prepare(
+    `INSERT INTO licenses (key_hash, key_prefix, label, max_pages, status, expires_at, global_pause, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'active', ?, 0, ?, ?)`
+  )
+    .bind(keyHash, keyPrefix, label, maxPages, expiresAt, nowIso, nowIso)
+    .run();
+
+  const licenseId = insertRes.meta?.last_row_id;
+  const license = await env.DB.prepare(
+    `SELECT id, key_prefix, label, max_pages, status, expires_at, global_pause, google_email, created_at, updated_at
+     FROM licenses WHERE id = ?`
+  )
+    .bind(licenseId)
+    .first();
+
+  await logEvent(env.DB, {
+    level: 'info',
+    eventType: 'license_created',
+    message: `Created License Key #${licenseId}${label ? ` (${label})` : ''}, max ${maxPages} pages`,
+    details: { licenseId, label, maxPages, expiresAt },
+  });
+
+  return jsonResponse({ license, rawKey }, 201);
+}
+
+async function handleUpdateLicense(request, env, licenseId) {
+  const existing = await env.DB.prepare(`SELECT * FROM licenses WHERE id = ?`).bind(licenseId).first();
+  if (!existing) return errorResponse('License not found', 404);
+
+  const body = await readJsonBody(request);
+  if (!body) return errorResponse('Invalid JSON body', 400);
+
+  const label =
+    typeof body.label === 'string' ? body.label.trim().slice(0, 120) : existing.label;
+  const maxPages =
+    body.maxPages != null
+      ? Math.max(1, Math.min(500, Math.round(Number(body.maxPages))))
+      : existing.max_pages;
+  const status =
+    body.status === 'active' || body.status === 'disabled' ? body.status : existing.status;
+
+  let expiresAt = existing.expires_at;
+  if (body.neverExpires === true) {
+    expiresAt = null;
+  } else if (body.extendDays != null && Number(body.extendDays) > 0) {
+    const baseMs =
+      existing.expires_at && Date.parse(existing.expires_at) > Date.now()
+        ? Date.parse(existing.expires_at)
+        : Date.now();
+    expiresAt = new Date(baseMs + Math.round(Number(body.extendDays)) * 86400_000).toISOString();
+  }
+
+  const nowIso = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE licenses SET label = ?, max_pages = ?, status = ?, expires_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(label, maxPages, status, expiresAt, nowIso, licenseId),
+    prepareEventStmt(env.DB, {
+      level: status === 'disabled' ? 'warn' : 'info',
+      eventType: 'license_updated',
+      message: `Updated License #${licenseId} (${label || existing.key_prefix}): status=${status}, maxPages=${maxPages}`,
+      details: { licenseId, status, maxPages, expiresAt },
+    }),
+  ]);
+
+  return jsonResponse({ ok: true });
+}
+
+async function handleDeleteLicense(env, licenseId) {
+  const existing = await env.DB.prepare(`SELECT id, label, key_prefix FROM licenses WHERE id = ?`)
+    .bind(licenseId)
+    .first();
+  if (!existing) return errorResponse('License not found', 404);
+
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM events WHERE license_id = ?`).bind(licenseId),
+    env.DB.prepare(`DELETE FROM pages WHERE license_id = ?`).bind(licenseId),
+    env.DB.prepare(`DELETE FROM accounts WHERE license_id = ?`).bind(licenseId),
+    env.DB.prepare(`DELETE FROM cached_tokens WHERE cache_key = ?`).bind(`google_oauth:${licenseId}`),
+    env.DB.prepare(`DELETE FROM licenses WHERE id = ?`).bind(licenseId),
+    prepareEventStmt(env.DB, {
+      level: 'warn',
+      eventType: 'license_deleted',
+      message: `Deleted License #${licenseId} (${existing.label || existing.key_prefix}) and all its workspace data`,
+    }),
+  ]);
+
+  return jsonResponse({ ok: true });
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -1132,256 +1535,181 @@ export default {
       const path = url.pathname;
       const method = request.method.toUpperCase();
 
-    // Public auth/session endpoints
-    if (path === '/api/session' && method === 'GET') {
-      const session = await getAuthenticatedSession(request, env);
-      return jsonResponse({ authenticated: Boolean(session) });
-    }
-    if (path === '/api/login' && method === 'POST') {
-      return handleLogin(request, env);
-    }
-    if (path === '/api/logout' && method === 'POST') {
-      return handleLogout(request, env);
-    }
+      // Public auth/session endpoints
+      if (path === '/api/session' && method === 'GET') {
+        const auth = await resolveAuthContext(request, env);
+        return jsonResponse({
+          authenticated: Boolean(auth),
+          role: auth?.role || null,
+          licenseId: auth?.licenseId ?? null,
+          label: auth?.label || null,
+          maxPages: auth?.maxPages ?? null,
+        });
+      }
+      if (path === '/api/login' && method === 'POST') {
+        return handleLogin(request, env);
+      }
+      if (path === '/api/logout' && method === 'POST') {
+        return handleLogout(request, env);
+      }
 
-    // Public Invite page (no admin login required)
-    let inviteMatch;
-    if ((inviteMatch = /^\/invite\/([^/]+)$/.exec(path)) && method === 'GET') {
-      const ip = getClientIp(request);
-      const rate = await checkInviteRateLimit(env, ip);
-      if (!rate.allowed) {
-        return withSecurityHeaders(
-          new Response(
-            renderInviteHtml({ valid: false, err: 'rate_limit' }),
-            { status: 429, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      // Google Drive OAuth endpoints
+      if (path === '/auth/google/start' && method === 'GET') {
+        return handleGoogleStart(request, env);
+      }
+      if (path === '/auth/google/callback' && method === 'GET') {
+        return handleGoogleCallback(request, env);
+      }
+
+      // Protected /api/* routes (Super Admin OR Active License)
+      if (path.startsWith('/api/')) {
+        const auth = await resolveAuthContext(request, env);
+        if (!auth) {
+          return errorResponse('Unauthorized', 401);
+        }
+
+        if (path === '/api/dashboard' && method === 'GET') {
+          return handleDashboard(env, auth);
+        }
+
+        if (path === '/api/settings/global-pause' && method === 'POST') {
+          const body = await readJsonBody(request);
+          const paused = Boolean(body?.paused);
+          const nowIso = new Date().toISOString();
+
+          if (auth.licenseId) {
+            await env.DB.batch([
+              env.DB.prepare(`UPDATE licenses SET global_pause = ?, updated_at = ? WHERE id = ?`).bind(
+                paused ? 1 : 0,
+                nowIso,
+                auth.licenseId
+              ),
+              prepareEventStmt(env.DB, {
+                licenseId: auth.licenseId,
+                level: paused ? 'warn' : 'info',
+                eventType: paused ? 'global_paused' : 'global_resumed',
+                message: paused ? 'Workspace pause enabled' : 'Workspace pause disabled',
+              }),
+            ]);
+          } else {
+            await env.DB.batch([
+              env.DB.prepare(
+                `INSERT INTO settings (key, value) VALUES ('global_pause', ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+              ).bind(paused ? '1' : '0'),
+              prepareEventStmt(env.DB, {
+                level: paused ? 'warn' : 'info',
+                eventType: paused ? 'global_paused' : 'global_resumed',
+                message: paused ? 'Global pause enabled (kill switch)' : 'Global pause disabled',
+              }),
+            ]);
+          }
+          return jsonResponse({ globalPause: paused });
+        }
+
+        if (path === '/api/accounts' && method === 'GET') {
+          return handleListAccounts(env, auth);
+        }
+        if (path === '/api/accounts/manual' && method === 'POST') {
+          return handleManualAccount(request, env, auth);
+        }
+
+        let m;
+        if ((m = /^\/api\/accounts\/(\d+)\/check$/.exec(path)) && method === 'POST') {
+          return handleCheckAccount(env, auth, Number(m[1]));
+        }
+        if ((m = /^\/api\/accounts\/(\d+)\/fb-pages$/.exec(path)) && method === 'GET') {
+          return handleAccountFbPages(env, auth, Number(m[1]));
+        }
+        if ((m = /^\/api\/accounts\/(\d+)\/pages$/.exec(path)) && method === 'POST') {
+          return handleAddAccountPages(request, env, auth, Number(m[1]));
+        }
+        if ((m = /^\/api\/accounts\/(\d+)$/.exec(path)) && method === 'DELETE') {
+          return handleDeleteAccount(env, auth, Number(m[1]));
+        }
+
+        if (path === '/api/drive/info' && method === 'GET') {
+          return handleDriveInfo(env, auth);
+        }
+        if (path === '/api/drive/folders' && method === 'GET') {
+          return handleDriveFolders(env, auth);
+        }
+        if (path === '/api/drive/disconnect' && method === 'POST') {
+          return handleDriveDisconnect(env, auth);
+        }
+
+        if ((m = /^\/api\/pages\/(\d+)$/.exec(path))) {
+          const pageId = Number(m[1]);
+          if (method === 'GET') return handleGetPage(env, auth, pageId);
+          if (method === 'PATCH') return handleUpdatePage(request, env, auth, pageId);
+          if (method === 'DELETE') return handleDeletePage(env, auth, pageId);
+        }
+        if ((m = /^\/api\/pages\/(\d+)\/pause$/.exec(path)) && method === 'POST') {
+          return handlePausePage(request, env, auth, Number(m[1]));
+        }
+        if ((m = /^\/api\/pages\/(\d+)\/preview$/.exec(path)) && method === 'POST') {
+          const pageId = Number(m[1]);
+          const owned = await verifyOwnedPage(env, auth, pageId);
+          if (!owned) return errorResponse('Page not found', 404);
+          try {
+            const preview = await previewNextPostForPage(env, pageId);
+            return jsonResponse(preview);
+          } catch (err) {
+            return errorResponse(err.message, 400);
+          }
+        }
+        if ((m = /^\/api\/pages\/(\d+)\/post-now$/.exec(path)) && method === 'POST') {
+          const pageId = Number(m[1]);
+          const owned = await verifyOwnedPage(env, auth, pageId);
+          if (!owned) return errorResponse('Page not found', 404);
+          try {
+            const result = await postNowForPage(env, pageId);
+            return jsonResponse(result);
+          } catch (err) {
+            return errorResponse(err.message, 400);
+          }
+        }
+        if ((m = /^\/api\/pages\/(\d+)\/retry-failed$/.exec(path)) && method === 'POST') {
+          return handleRetryFailed(env, auth, Number(m[1]));
+        }
+        if ((m = /^\/api\/pages\/(\d+)\/blocked-files$/.exec(path)) && method === 'GET') {
+          const pageId = Number(m[1]);
+          const owned = await verifyOwnedPage(env, auth, pageId);
+          if (!owned) return errorResponse('Page not found', 404);
+          const res = await env.DB.prepare(
+            `SELECT id, file_id, file_name, reason, attempts, created_at FROM blocked_files WHERE page_id = ? ORDER BY id DESC`
           )
-        );
-      }
-
-      const rawToken = decodeURIComponent(inviteMatch[1]);
-      const { valid, invite } = await lookupValidInvite(env, rawToken);
-      const errParam = url.searchParams.get('err') || '';
-      const stepParam = url.searchParams.get('step') || 'intro';
-
-      if (!valid || !invite) {
-        await recordInviteBadHit(env, ip);
-        return withSecurityHeaders(
-          new Response(
-            renderInviteHtml({ valid: false, err: errParam || 'invalid' }),
-            { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
-          )
-        );
-      }
-
-      let step = 'intro';
-      if (stepParam === 'select') {
-        const cookies = parseCookies(request);
-        const invSession = await verifyInviteSessionCookie(cookies[INVITE_SESSION_COOKIE], env);
-        if (invSession && Number(invSession.inviteId) === Number(invite.id)) {
-          step = 'select';
+            .bind(pageId)
+            .all();
+          return jsonResponse({ blockedFiles: res.results || [] });
         }
-      }
-
-      if (step === 'intro' && !errParam) {
-        await logEvent(env.DB, {
-          level: 'info',
-          eventType: 'invite_opened',
-          message: `Invite #${invite.id}${invite.label ? ` (${invite.label})` : ''} opened`,
-          details: { inviteId: invite.id },
-        });
-      }
-
-      return withSecurityHeaders(
-        new Response(
-          renderInviteHtml({
-            token: rawToken,
-            valid: true,
-            step,
-            err: errParam,
-            label: invite.label || '',
-          }),
-          { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
-        )
-      );
-    }
-
-    // Public Invite APIs (strictly scoped to signed pp_invite_session cookie)
-    if (path === '/api/invite/pages' && method === 'GET') {
-      const ip = getClientIp(request);
-      const rate = await checkInviteRateLimit(env, ip);
-      if (!rate.allowed) return errorResponse('Too many requests. Please try again later.', 429);
-
-      const cookies = parseCookies(request);
-      const invSession = await verifyInviteSessionCookie(cookies[INVITE_SESSION_COOKIE], env);
-      if (!invSession) {
-        await recordInviteBadHit(env, ip);
-        return errorResponse('Your invite session has expired. Please open the invite link again.', 401);
-      }
-      try {
-        const data = await getInviteSelectablePages(env, invSession);
-        return jsonResponse(data);
-      } catch (err) {
-        return errorResponse(err.message, 400);
-      }
-    }
-
-    if (path === '/api/invite/confirm' && method === 'POST') {
-      const ip = getClientIp(request);
-      const rate = await checkInviteRateLimit(env, ip);
-      if (!rate.allowed) return errorResponse('Too many requests. Please try again later.', 429);
-
-      const cookies = parseCookies(request);
-      const invSession = await verifyInviteSessionCookie(cookies[INVITE_SESSION_COOKIE], env);
-      if (!invSession) {
-        await recordInviteBadHit(env, ip);
-        return errorResponse('Your invite session has expired. Please open the invite link again.', 401);
-      }
-      const body = await readJsonBody(request);
-      try {
-        const result = await confirmInviteSelection(env, invSession, body?.fbPageIds);
-        const clearInviteCookie = makeCookieHeader(INVITE_SESSION_COOKIE, '', {
-          maxAge: 0,
-          path: '/',
-          sameSite: 'Lax',
-          secure: isHttpsTransport(request, env),
-        });
-        return jsonResponse(result, 200, { 'Set-Cookie': clearInviteCookie });
-      } catch (err) {
-        return errorResponse(err.message, 400);
-      }
-    }
-
-    // Facebook OAuth endpoints
-    if (path === '/auth/facebook/start' && method === 'GET') {
-      return handleFacebookStart(request, env);
-    }
-    if (path === '/auth/facebook/callback' && method === 'GET') {
-      return handleFacebookCallback(request, env);
-    }
-
-    // Protected /api/* routes (Admin only)
-    if (path.startsWith('/api/')) {
-      const session = await getAuthenticatedSession(request, env);
-      if (!session) {
-        return errorResponse('Unauthorized', 401);
-      }
-
-      if (path === '/api/dashboard' && method === 'GET') {
-        return handleDashboard(env);
-      }
-
-      if (path === '/api/settings/global-pause' && method === 'POST') {
-        const body = await readJsonBody(request);
-        const paused = Boolean(body?.paused);
-        await env.DB.batch([
-          env.DB.prepare(
-            `INSERT INTO settings (key, value) VALUES ('global_pause', ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-          ).bind(paused ? '1' : '0'),
-          prepareEventStmt(env.DB, {
-            level: paused ? 'warn' : 'info',
-            eventType: paused ? 'global_paused' : 'global_resumed',
-            message: paused ? 'Global pause enabled (kill switch)' : 'Global pause disabled',
-          }),
-        ]);
-        return jsonResponse({ globalPause: paused });
-      }
-
-      if (path === '/api/accounts' && method === 'GET') {
-        return handleListAccounts(env);
-      }
-      if (path === '/api/accounts/manual' && method === 'POST') {
-        return handleManualAccount(request, env);
-      }
-
-      if (path === '/api/invites' && method === 'GET') {
-        return jsonResponse({ invites: await listInvites(env) });
-      }
-      if (path === '/api/invites' && method === 'POST') {
-        const body = await readJsonBody(request);
-        const result = await createInvite(env, {
-          label: body?.label || '',
-          expiresHours: body?.expiresHours ?? 48,
-          origin: url.origin,
-        });
-        return jsonResponse(result);
-      }
-
-      let m;
-      if ((m = /^\/api\/invites\/(\d+)\/revoke$/.exec(path)) && method === 'POST') {
-        const revoked = await revokeInvite(env, Number(m[1]));
-        if (!revoked) return errorResponse('Invite not found or already used/revoked', 404);
-        return jsonResponse({ ok: true });
-      }
-
-      if ((m = /^\/api\/accounts\/(\d+)\/check$/.exec(path)) && method === 'POST') {
-        return handleCheckAccount(env, Number(m[1]));
-      }
-      if ((m = /^\/api\/accounts\/(\d+)\/fb-pages$/.exec(path)) && method === 'GET') {
-        return handleAccountFbPages(env, Number(m[1]));
-      }
-      if ((m = /^\/api\/accounts\/(\d+)\/pages$/.exec(path)) && method === 'POST') {
-        return handleAddAccountPages(request, env, Number(m[1]));
-      }
-      if ((m = /^\/api\/accounts\/(\d+)$/.exec(path)) && method === 'DELETE') {
-        return handleDeleteAccount(env, Number(m[1]));
-      }
-
-      if (path === '/api/drive/info' && method === 'GET') {
-        return handleDriveInfo(env);
-      }
-      if (path === '/api/drive/folders' && method === 'GET') {
-        return handleDriveFolders(env);
-      }
-
-      if ((m = /^\/api\/pages\/(\d+)$/.exec(path))) {
-        const pageId = Number(m[1]);
-        if (method === 'GET') return handleGetPage(env, pageId);
-        if (method === 'PATCH') return handleUpdatePage(request, env, pageId);
-        if (method === 'DELETE') return handleDeletePage(env, pageId);
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/pause$/.exec(path)) && method === 'POST') {
-        return handlePausePage(request, env, Number(m[1]));
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/preview$/.exec(path)) && method === 'POST') {
-        try {
-          const preview = await previewNextPostForPage(env, Number(m[1]));
-          return jsonResponse(preview);
-        } catch (err) {
-          return errorResponse(err.message, 400);
+        if ((m = /^\/api\/pages\/(\d+)\/unblock$/.exec(path)) && method === 'POST') {
+          return handleUnblockFiles(request, env, auth, Number(m[1]));
         }
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/post-now$/.exec(path)) && method === 'POST') {
-        try {
-          const result = await postNowForPage(env, Number(m[1]));
-          return jsonResponse(result);
-        } catch (err) {
-          return errorResponse(err.message, 400);
+
+        if (path === '/api/events' && method === 'GET') {
+          return handleEvents(request, env, auth);
         }
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/retry-failed$/.exec(path)) && method === 'POST') {
-        return handleRetryFailed(env, Number(m[1]));
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/blocked-files$/.exec(path)) && method === 'GET') {
-        const res = await env.DB.prepare(
-          `SELECT id, file_id, file_name, reason, attempts, created_at FROM blocked_files WHERE page_id = ? ORDER BY id DESC`
-        )
-          .bind(Number(m[1]))
-          .all();
-        return jsonResponse({ blockedFiles: res.results || [] });
-      }
-      if ((m = /^\/api\/pages\/(\d+)\/unblock$/.exec(path)) && method === 'POST') {
-        return handleUnblockFiles(request, env, Number(m[1]));
+
+        // Super Admin only: License Key Management
+        if (path === '/api/licenses' && method === 'GET') {
+          if (auth.role !== 'admin') return errorResponse('Forbidden', 403);
+          return handleListLicenses(env);
+        }
+        if (path === '/api/licenses' && method === 'POST') {
+          if (auth.role !== 'admin') return errorResponse('Forbidden', 403);
+          return handleCreateLicense(request, env);
+        }
+        if ((m = /^\/api\/licenses\/(\d+)$/.exec(path))) {
+          if (auth.role !== 'admin') return errorResponse('Forbidden', 403);
+          const licId = Number(m[1]);
+          if (method === 'PATCH') return handleUpdateLicense(request, env, licId);
+          if (method === 'DELETE') return handleDeleteLicense(env, licId);
+        }
+
+        return errorResponse('API route not found', 404);
       }
 
-      if (path === '/api/events' && method === 'GET') {
-        return handleEvents(request, env);
-      }
-
-      return errorResponse('API route not found', 404);
-    }
-
-    // Friendly fallback if static asset wasn't matched directly
       if (env.ASSETS) {
         return withSecurityHeaders(await env.ASSETS.fetch(request), { noStore: false });
       }

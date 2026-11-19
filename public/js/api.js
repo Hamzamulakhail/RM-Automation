@@ -34,7 +34,7 @@ export async function apiFetch(path, options = {}, onUnauthorized = null) {
   };
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/api/login' && !path.startsWith('/api/invite/')) {
+  if (res.status === 401 && path !== '/api/login') {
     if (onUnauthorized) onUnauthorized();
     throw new Error(data.error || 'Session expired');
   }

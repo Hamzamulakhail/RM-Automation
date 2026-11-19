@@ -11,18 +11,18 @@
     <div class="card legal-card">
       <h1>User Data Deletion Instructions</h1>
       <p>
-        <strong>RM Automation</strong> stores your Facebook account identifier, Page identifiers, encrypted access tokens,
-        schedule configuration, and operational logs inside your private Cloudflare D1 database.
+        <strong>RM Automation</strong> stores your workspace license identifier, connected Google email and encrypted refresh token,
+        Facebook account/Page identifiers and encrypted access tokens, schedule configuration, and operational logs inside Cloudflare D1.
       </p>
       <h2>How to Delete Your Data</h2>
       <ol>
-        <li>Open the RM Automation admin panel and sign in.</li>
-        <li>Go to the <strong>Accounts</strong> tab and click <strong>Delete</strong> next to any connected Facebook account. This immediately deletes the account record, encrypted user token, linked Pages, encrypted Page tokens, and scheduled plan rows from D1.</li>
-        <li>To revoke app permissions on Facebook directly: open Facebook &rarr; <strong>Settings &amp; Privacy</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Business Integrations</strong> (or <strong>Apps and Websites</strong>), select <strong>RM Automation</strong>, and click <strong>Remove</strong>.</li>
-        <li>To wipe all remaining logs or configuration, delete or reset the Cloudflare D1 database (<code>page-poster-db</code>) from your Cloudflare Dashboard.</li>
+        <li>Sign in to your RM Automation workspace with your License Key (or as Super Admin).</li>
+        <li><strong>Disconnect Google Drive:</strong> Go to the <strong>Accounts &amp; Drive</strong> tab and click <strong>Disconnect</strong> on the Google Drive card. This immediately revokes the OAuth token with Google and deletes your Google email and encrypted refresh token from D1. You can also revoke access from your Google Account &rarr; <strong>Security</strong> &rarr; <strong>Third-party apps &amp; services</strong>.</li>
+        <li><strong>Delete Facebook Accounts &amp; Pages:</strong> On the <strong>Accounts &amp; Drive</strong> tab, click <strong>Delete</strong> next to any connected Facebook account or Page entry. This immediately deletes the account record, encrypted tokens, linked Pages, and scheduled plan rows from D1.</li>
+        <li><strong>Full Workspace Removal:</strong> The Super Admin can delete a customer License Key under the <strong>Licenses</strong> tab to cascade-delete all associated accounts, Pages, schedules, blocked items, and logs immediately.</li>
       </ol>
       <p>
-        For questions or manual removal requests, contact the operator of this RM Automation instance.
+        For manual removal requests, contact the operator of this RM Automation deployment.
       </p>
     </div>
   </main>

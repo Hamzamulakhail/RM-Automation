@@ -12,29 +12,28 @@
       <h1>Privacy Policy</h1>
       <p class="muted">Effective date: 2026-01-01</p>
       <p>
-        <strong>RM Automation</strong> is a private administrative automation tool operated by the owner of this deployment
-        to publish scheduled photos, videos, and captions from designated Google Drive folders to authorized Facebook Pages.
+        <strong>RM Automation</strong> is a multi-workspace social publishing automation platform hosted on Cloudflare Workers
+        that publishes scheduled photos, videos, and captions from a user's connected Google Drive folders to authorized Facebook Pages.
       </p>
       <h2>Information We Process</h2>
       <ul>
-        <li>Facebook User ID, display name, and Page IDs/names retrieved via Facebook Login with your explicit consent (<code>pages_show_list</code>, <code>pages_manage_posts</code>, <code>pages_read_engagement</code>).</li>
-        <li>Encrypted Facebook User and Page access tokens stored in Cloudflare D1 using AES-256-GCM encryption.</li>
-        <li>Google Drive folder IDs, file metadata, and caption text read from folders explicitly shared with the configured Google Service Account.</li>
-        <li>Operational schedules, post history, and diagnostic event logs (automatically pruned after 30 days).</li>
+        <li><strong>Google Account &amp; Google Drive (OAuth 2.0):</strong> With your explicit consent via Google Sign-In (<code>https://www.googleapis.com/auth/drive</code> and <code>https://www.googleapis.com/auth/userinfo.email</code>), we store your Google account email address and an AES-256-GCM encrypted OAuth refresh token in Cloudflare D1 solely to list folders you select, read caption files (<code>captions.txt</code>) and media files, update caption files after posting, and move posted media files to your Google Drive Trash.</li>
+        <li><strong>Facebook Accounts &amp; Pages:</strong> Facebook account/Page IDs, names, and access tokens pasted directly by you inside your workspace. All tokens are stored in Cloudflare D1 using AES-256-GCM encryption and are never returned in plaintext to the browser.</li>
+        <li><strong>License &amp; Workspace Data:</strong> Workspace license metadata, Page schedules, queue status, and diagnostic event logs (automatically pruned after 30 days).</li>
       </ul>
       <h2>How Data Is Used &amp; Shared</h2>
       <p>
-        Data is used solely to publish content to your selected Facebook Pages and monitor delivery status.
-        No data is sold, rented, or shared with third parties other than Meta Graph API and Google Drive API as required to perform scheduled posting.
+        Data is used strictly within your isolated workspace to publish content from your Google Drive folders to your selected Facebook Pages and report delivery status.
+        RM Automation does not sell, rent, or transfer Google user data or Facebook data to third parties or use it for advertising, profiling, or model training; requests are sent only to Google Drive API and Meta Graph API as required to perform scheduled posting.
       </p>
       <h2>Security</h2>
       <p>
-        All access tokens are encrypted at rest and never exposed to the browser after authorization.
-        Access to the administration panel is protected by a password and signed HttpOnly session cookies.
+        All Google OAuth refresh tokens and Facebook access tokens are encrypted at rest with AES-256-GCM before being persisted to Cloudflare D1.
+        Access to each workspace is protected by an admin password or unique License Key and signed <code>HttpOnly</code> session cookies.
       </p>
-      <h2>Data Deletion</h2>
+      <h2>Revoking Access &amp; Data Deletion</h2>
       <p>
-        You may revoke access and delete stored accounts, Pages, and encrypted tokens at any time from the admin panel or by following the instructions on the
+        You may disconnect Google Drive or delete stored Facebook accounts, Pages, and encrypted tokens at any time directly inside your workspace, or follow the steps on the
         <a href="/data-deletion.html">Data Deletion page</a>.
       </p>
     </div>
