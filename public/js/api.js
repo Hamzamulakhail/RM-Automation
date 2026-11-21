@@ -76,8 +76,30 @@ export function minutesFromHHMM(hhmm) {
   return h * 60 + min;
 }
 
+export function formatTime12h(hhmm) {
+  const mins = minutesFromHHMM(hhmm);
+  if (mins === null) return String(hhmm || '');
+  const h24 = Math.floor(mins / 60);
+  const m = mins % 60;
+  const ampm = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+}
+
+export function to24hHHMM(hour12, minute, ampm) {
+  const h = Number(hour12);
+  const m = Number(minute);
+  if (!Number.isInteger(h) || h < 1 || h > 12 || !Number.isInteger(m) || m < 0 || m > 59) {
+    return null;
+  }
+  let h24 = h % 12;
+  if (String(ampm).toUpperCase() === 'PM') h24 += 12;
+  return `${String(h24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 export function buildScheduleSummary({ slots, jitter, dailyCap, minGap, rampEnabled, rampStart }, lang) {
-  const effectiveCap = Math.min(Number(dailyCap) || 1, Math.max(1, (slots || []).length || 1));
+  const slotCount = Math.max(1, (slots || []).length || 1);
+  const effectiveCap = Math.min(Math.max(1, Number(dailyCap) || slotCount), slotCount);
   const sorted = [...(slots || [])].map(minutesFromHHMM).filter((v) => v !== null).sort((a, b) => a - b);
   let avgGapMin = Number(minGap) || 0;
   if (sorted.length >= 2) {

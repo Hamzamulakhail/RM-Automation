@@ -23,6 +23,7 @@ import {
   previewNextPostForPage,
   regenerateTodayPlanForPage,
   runCron,
+  syncDriveQueueForPage,
 } from './scheduler.js';
 import { getLocalParts, isValidTimeZone, minutesToHHMM, parseSlotMinutes } from './timezone.js';
 
@@ -272,7 +273,7 @@ async function handleLogin(request, env) {
         retryAfterSeconds: Math.ceil(LOGIN_LOCKOUT_MS / 1000),
       });
     }
-    return errorResponse('Invalid license key or admin password', 401);
+    return errorResponse('Invalid license key', 401);
   }
 
   const token = await signToken(
@@ -550,11 +551,12 @@ async function handleDashboard(env, auth) {
     env.DB.prepare(`SELECT value FROM settings WHERE key = 'global_pause'`),
     env.DB.prepare(
       `SELECT
-         p.id, p.account_id, p.fb_page_id, p.name,
+         p.id, p.account_id, p.fb_page_id, p.name, p.picture_url,
          p.captions_folder_id, p.captions_folder_name,
          p.media_folder_id, p.media_folder_name,
          p.timezone, p.slots, p.jitter_minutes, p.daily_cap,
          p.min_gap_minutes, p.ramp_up_enabled, p.ramp_start, p.ramp_step_days,
+         p.last_drive_sync_at, p.last_drive_sync_error,
          p.status, p.last_error, p.created_at, p.updated_at,
          a.name AS account_name, a.status AS account_status, a.token_kind AS account_token_kind
        FROM pages p
@@ -564,7 +566,7 @@ async function handleDashboard(env, auth) {
     ).bind(...pageScope.params),
     env.DB.prepare(
       `SELECT pl.id, pl.page_id, pl.local_date, pl.slot_time, pl.planned_local, pl.planned_utc,
-              pl.status, pl.attempts, pl.next_attempt_utc, pl.fb_post_id, pl.file_name, pl.caption_number,
+              pl.status, pl.attempts, pl.next_attempt_utc, pl.fb_post_id, pl.file_id, pl.file_name, pl.caption_number,
               substr(pl.caption_text, 1, 140) AS caption_preview,
               pl.error, pl.finished_at, pl.cleanup_pending
        FROM plan pl
@@ -752,21 +754,22 @@ async function handleManualAccount(request, env, auth) {
       .first();
 
     await env.DB.prepare(
-      `INSERT INTO pages (account_id, license_id, fb_page_id, name, encrypted_page_token, status, last_error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?)
+      `INSERT INTO pages (account_id, license_id, fb_page_id, name, picture_url, encrypted_page_token, status, last_error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)
        ON CONFLICT(fb_page_id) DO UPDATE SET
          account_id = excluded.account_id,
          name = excluded.name,
+         picture_url = COALESCE(NULLIF(excluded.picture_url, ''), pages.picture_url),
          encrypted_page_token = excluded.encrypted_page_token,
          status = CASE WHEN pages.status = 'needs_attention' THEN 'active' ELSE pages.status END,
          last_error = NULL,
          updated_at = excluded.updated_at`
     )
-      .bind(account.id, auth.licenseId, identity.id, identity.name, encrypted, nowIso, nowIso)
+      .bind(account.id, auth.licenseId, identity.id, identity.name, identity.pictureUrl || '', encrypted, nowIso, nowIso)
       .run();
 
     const page = await env.DB.prepare(
-      `SELECT id, account_id, fb_page_id, name, status FROM pages WHERE fb_page_id = ?`
+      `SELECT id, account_id, fb_page_id, name, picture_url, status FROM pages WHERE fb_page_id = ?`
     )
       .bind(identity.id)
       .first();
@@ -853,10 +856,27 @@ async function handleCheckAccount(env, auth, accountId) {
       stmts.push(
         env.DB.prepare(
           `UPDATE pages SET status = CASE WHEN status = 'needs_attention' THEN 'active' ELSE status END,
+                           name = ?,
+                           picture_url = COALESCE(NULLIF(?, ''), picture_url),
                            last_error = NULL, updated_at = ?
            WHERE account_id = ?`
-        ).bind(nowIso, accountId)
+        ).bind(identity.name, identity.pictureUrl || '', nowIso, accountId)
       );
+    } else {
+      try {
+        const fbPages = await fetchUserPages(env, token);
+        for (const p of fbPages) {
+          if (p.picture_url) {
+            stmts.push(
+              env.DB.prepare(
+                `UPDATE pages SET picture_url = ?, name = ?, updated_at = ? WHERE account_id = ? AND fb_page_id = ?`
+              ).bind(p.picture_url, p.name, nowIso, accountId, p.id)
+            );
+          }
+        }
+      } catch {
+        // Non-fatal if /me/accounts refresh fails
+      }
     }
     await env.DB.batch(stmts);
     return jsonResponse({ ok: true, status: 'active', name: identity.name });
@@ -894,6 +914,7 @@ async function handleAccountFbPages(env, auth, accountId) {
           {
             fb_page_id: pageInfo.id,
             name: pageInfo.name,
+            picture_url: pageInfo.pictureUrl || '',
             tasks: [],
             alreadyAdded: Boolean(existingPage),
             existingPageId: existingPage?.id || null,
@@ -916,6 +937,7 @@ async function handleAccountFbPages(env, auth, accountId) {
       pages: fbPages.map((p) => ({
         fb_page_id: p.id,
         name: p.name,
+        picture_url: p.picture_url || '',
         tasks: p.tasks,
         alreadyAdded: existingMap.has(p.id),
         existingPageId: existingMap.get(p.id) || null,
@@ -945,7 +967,7 @@ async function handleAddAccountPages(request, env, auth, accountId) {
   if (account.token_kind === 'page_direct') {
     const pageInfo = await fetchTokenIdentity(env, userToken, 'page');
     if (selectedSet.has(pageInfo.id)) {
-      matched = [{ id: pageInfo.id, name: pageInfo.name, access_token: userToken }];
+      matched = [{ id: pageInfo.id, name: pageInfo.name, picture_url: pageInfo.pictureUrl || '', access_token: userToken }];
     }
   } else {
     const fbPages = await fetchUserPages(env, userToken);
@@ -990,16 +1012,17 @@ async function handleAddAccountPages(request, env, auth, accountId) {
     const encryptedPageToken = await encryptText(p.access_token, env.ENCRYPTION_KEY);
     stmts.push(
       env.DB.prepare(
-        `INSERT INTO pages (account_id, license_id, fb_page_id, name, encrypted_page_token, status, last_error, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?)
+        `INSERT INTO pages (account_id, license_id, fb_page_id, name, picture_url, encrypted_page_token, status, last_error, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)
          ON CONFLICT(fb_page_id) DO UPDATE SET
            account_id = excluded.account_id,
            name = excluded.name,
+           picture_url = COALESCE(NULLIF(excluded.picture_url, ''), pages.picture_url),
            encrypted_page_token = excluded.encrypted_page_token,
            status = CASE WHEN pages.status = 'needs_attention' THEN 'active' ELSE pages.status END,
            last_error = NULL,
            updated_at = excluded.updated_at`
-      ).bind(account.id, auth.licenseId, p.id, p.name, encryptedPageToken, nowIso, nowIso)
+      ).bind(account.id, auth.licenseId, p.id, p.name, p.picture_url || '', encryptedPageToken, nowIso, nowIso)
     );
   }
   stmts.push(
@@ -1098,11 +1121,12 @@ async function handleGetPage(env, auth, pageId) {
 
   const [pageRes, blockedRes, recentPlansRes, recentEventsRes] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT p.id, p.account_id, p.fb_page_id, p.name,
+      `SELECT p.id, p.account_id, p.fb_page_id, p.name, p.picture_url,
               p.captions_folder_id, p.captions_folder_name,
               p.media_folder_id, p.media_folder_name,
               p.timezone, p.slots, p.jitter_minutes, p.daily_cap,
               p.min_gap_minutes, p.ramp_up_enabled, p.ramp_start, p.ramp_step_days,
+              p.last_drive_sync_at, p.last_drive_sync_error,
               p.status, p.last_error, p.created_at, p.updated_at,
               a.name AS account_name, a.status AS account_status
        FROM pages p JOIN accounts a ON a.id = p.account_id
@@ -1175,14 +1199,25 @@ async function handleUpdatePage(request, env, auth, pageId) {
 
   const jitter =
     body.jitter_minutes != null ? Math.max(0, Math.min(180, Math.round(Number(body.jitter_minutes)))) : existing.jitter_minutes;
+  const parsedCleanSlots = (() => {
+    try {
+      return JSON.parse(slotsJson || '[]');
+    } catch {
+      return [];
+    }
+  })();
   const dailyCap =
-    body.daily_cap != null ? Math.max(1, Math.min(24, Math.round(Number(body.daily_cap)))) : existing.daily_cap;
+    body.auto_cap === true
+      ? Math.max(1, parsedCleanSlots.length || 1)
+      : body.daily_cap != null
+        ? Math.max(1, Math.min(50, Math.round(Number(body.daily_cap))))
+        : existing.daily_cap;
   const minGap =
     body.min_gap_minutes != null ? Math.max(0, Math.min(720, Math.round(Number(body.min_gap_minutes)))) : existing.min_gap_minutes;
   const rampEnabled =
     body.ramp_up_enabled != null ? (body.ramp_up_enabled ? 1 : 0) : existing.ramp_up_enabled;
   const rampStart =
-    body.ramp_start != null ? Math.max(1, Math.min(24, Math.round(Number(body.ramp_start)))) : existing.ramp_start;
+    body.ramp_start != null ? Math.max(1, Math.min(50, Math.round(Number(body.ramp_start)))) : existing.ramp_start;
   const rampStepDays =
     body.ramp_step_days != null ? Math.max(1, Math.min(30, Math.round(Number(body.ramp_step_days)))) : existing.ramp_step_days;
 
@@ -1199,6 +1234,7 @@ async function handleUpdatePage(request, env, auth, pageId) {
   const status = allowedStatuses.has(body.status) ? body.status : existing.status;
   const lastError = status === 'active' ? null : existing.last_error;
   const nowIso = new Date().toISOString();
+  const oldLocalDate = getLocalParts(Date.now(), existing.timezone).localDate;
 
   await env.DB.batch([
     env.DB.prepare(
@@ -1239,7 +1275,10 @@ async function handleUpdatePage(request, env, auth, pageId) {
 
   const updated = await env.DB.prepare(`SELECT * FROM pages WHERE id = ?`).bind(pageId).first();
   if (updated && updated.status === 'active') {
-    await regenerateTodayPlanForPage(env, updated);
+    await regenerateTodayPlanForPage(env, updated, oldLocalDate);
+    if (updated.captions_folder_id && updated.media_folder_id) {
+      await syncDriveQueueForPage(env, updated, { force: true }).catch(() => null);
+    }
   }
 
   return jsonResponse({ ok: true });
@@ -1362,6 +1401,99 @@ async function handleUnblockFiles(request, env, auth, pageId) {
     ]);
   }
   return jsonResponse({ ok: true, unblockedCount: res[0]?.meta?.changes || 0 });
+}
+
+async function handlePostsFeed(request, env, auth) {
+  const url = new URL(request.url);
+  const pageId = url.searchParams.get('pageId');
+  const status = url.searchParams.get('status');
+  const limit = Math.min(200, Math.max(20, Number(url.searchParams.get('limit') || 120)));
+
+  const scope = licenseScopeSql('p.license_id', auth.licenseId);
+  const where = [scope.sql];
+  const params = [...scope.params];
+
+  if (pageId && /^\d+$/.test(pageId)) {
+    where.push('pl.page_id = ?');
+    params.push(Number(pageId));
+  }
+  if (status && ['pending', 'posting', 'posted', 'failed', 'skipped', 'missed'].includes(status)) {
+    where.push('pl.status = ?');
+    params.push(status);
+  }
+
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+  params.push(limit);
+
+  const res = await env.DB.prepare(
+    `SELECT pl.id, pl.page_id, pl.local_date, pl.slot_time, pl.planned_local, pl.planned_utc,
+            pl.status, pl.attempts, pl.next_attempt_utc, pl.fb_post_id, pl.file_id, pl.file_name,
+            pl.caption_number, substr(pl.caption_text, 1, 200) AS caption_preview,
+            pl.error, pl.finished_at,
+            p.name AS page_name, p.fb_page_id, p.picture_url AS page_picture_url, p.timezone AS page_timezone
+     FROM plan pl
+     JOIN pages p ON p.id = pl.page_id
+     ${whereSql}
+     ORDER BY
+       CASE WHEN pl.status IN ('posting', 'pending') THEN 0 ELSE 1 END ASC,
+       CASE WHEN pl.status IN ('posting', 'pending') THEN pl.planned_utc END ASC,
+       pl.planned_utc DESC
+     LIMIT ?`
+  )
+    .bind(...params)
+    .all();
+
+  return jsonResponse({ posts: res.results || [] });
+}
+
+async function handleSyncWorkspacePosts(request, env, auth) {
+  const body = await readJsonBody(request);
+  const targetPageId = body?.pageId ? Number(body.pageId) : null;
+  const scope = licenseScopeSql('p.license_id', auth.licenseId);
+
+  let pages = [];
+  if (targetPageId) {
+    const owned = await verifyOwnedPage(env, auth, targetPageId);
+    if (!owned) return errorResponse('Page not found', 404);
+    pages = [owned];
+  } else {
+    const res = await env.DB.prepare(
+      `SELECT p.* FROM pages p
+       JOIN accounts a ON a.id = p.account_id
+       WHERE ${scope.sql} AND p.status = 'active' AND a.status = 'active'
+         AND p.captions_folder_id != '' AND p.media_folder_id != ''
+       ORDER BY COALESCE(p.last_drive_sync_at, '') ASC
+       LIMIT 6`
+    )
+      .bind(...scope.params)
+      .all();
+    pages = res.results || [];
+  }
+
+  let syncedPages = 0;
+  let filledSlots = 0;
+  const results = [];
+
+  for (const page of pages) {
+    const localDate = getLocalParts(Date.now(), page.timezone).localDate;
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM plan WHERE page_id = ? AND local_date = ?`
+    )
+      .bind(page.id, localDate)
+      .first();
+    if (!countRow || Number(countRow.cnt) === 0) {
+      await regenerateTodayPlanForPage(env, page);
+    }
+
+    const res = await syncDriveQueueForPage(env, page, { force: true });
+    if (res.synced) {
+      syncedPages++;
+      filledSlots += Number(res.filledCount || 0);
+    }
+    results.push({ pageId: page.id, pageName: page.name, ...res });
+  }
+
+  return jsonResponse({ ok: true, syncedPages, filledSlots, results });
 }
 
 async function handleEvents(request, env, auth) {
@@ -1683,10 +1815,32 @@ export default {
             .all();
           return jsonResponse({ blockedFiles: res.results || [] });
         }
+        if ((m = /^\/api\/pages\/(\d+)\/sync$/.exec(path)) && method === 'POST') {
+          const pageId = Number(m[1]);
+          const owned = await verifyOwnedPage(env, auth, pageId);
+          if (!owned) return errorResponse('Page not found', 404);
+          const localDate = getLocalParts(Date.now(), owned.timezone).localDate;
+          const cntRow = await env.DB.prepare(
+            `SELECT COUNT(*) AS cnt FROM plan WHERE page_id = ? AND local_date = ?`
+          )
+            .bind(pageId, localDate)
+            .first();
+          if ((!cntRow || Number(cntRow.cnt) === 0) && owned.status === 'active') {
+            await regenerateTodayPlanForPage(env, owned);
+          }
+          const result = await syncDriveQueueForPage(env, owned, { force: true });
+          return jsonResponse({ ok: true, ...result });
+        }
         if ((m = /^\/api\/pages\/(\d+)\/unblock$/.exec(path)) && method === 'POST') {
           return handleUnblockFiles(request, env, auth, Number(m[1]));
         }
 
+        if (path === '/api/posts' && method === 'GET') {
+          return handlePostsFeed(request, env, auth);
+        }
+        if (path === '/api/posts/sync' && method === 'POST') {
+          return handleSyncWorkspacePosts(request, env, auth);
+        }
         if (path === '/api/events' && method === 'GET') {
           return handleEvents(request, env, auth);
         }

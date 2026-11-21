@@ -406,29 +406,59 @@ export async function listMediaFiles(env, folderId, licenseId = null) {
   return files;
 }
 
+const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
+const CAPTION_NAME_PRIORITY = ['captions.txt', 'caption.txt', 'captions', 'caption'];
+
 export async function findCaptionsFile(env, folderId, licenseId = null) {
   const safeId = folderId.replace(/'/g, "\\'");
-  const q = `'${safeId}' in parents and name = 'captions.txt' and trashed = false`;
+  const q = `'${safeId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`;
   const params = new URLSearchParams({
     q,
-    fields: 'files(id,name,version,capabilities(canEdit))',
+    fields: 'files(id,name,mimeType,version,capabilities(canEdit))',
     includeItemsFromAllDrives: 'true',
     supportsAllDrives: 'true',
-    pageSize: '5',
+    pageSize: '60',
   });
   const res = await driveFetch(env, `${DRIVE_API}/files?${params.toString()}`, {}, licenseId);
   const data = await res.json();
-  return data.files?.[0] || null;
+  const candidates = (data.files || []).filter((f) => {
+    const lower = String(f.name || '').trim().toLowerCase();
+    if (!CAPTION_NAME_PRIORITY.includes(lower)) return false;
+    const isGoogleDoc = f.mimeType === GOOGLE_DOC_MIME;
+    const isText = f.mimeType === 'text/plain' || lower.endsWith('.txt') || !f.mimeType;
+    return isGoogleDoc || isText;
+  });
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => {
+    const aDoc = a.mimeType === GOOGLE_DOC_MIME ? 1 : 0;
+    const bDoc = b.mimeType === GOOGLE_DOC_MIME ? 1 : 0;
+    if (aDoc !== bDoc) return aDoc - bDoc; // Prefer plain .txt over Google Doc if both exist
+    const aIdx = CAPTION_NAME_PRIORITY.indexOf(String(a.name || '').trim().toLowerCase());
+    const bIdx = CAPTION_NAME_PRIORITY.indexOf(String(b.name || '').trim().toLowerCase());
+    return aIdx - bIdx;
+  });
+
+  const best = candidates[0];
+  return {
+    ...best,
+    isGoogleDoc: best.mimeType === GOOGLE_DOC_MIME,
+  };
 }
 
-export async function downloadTextFile(env, fileId, licenseId = null) {
-  const res = await driveFetch(
-    env,
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
-    {},
-    licenseId
-  );
-  return res.text();
+export async function downloadTextFile(env, fileOrId, licenseId = null) {
+  const isObj = typeof fileOrId === 'object' && fileOrId !== null;
+  const fileId = isObj ? fileOrId.id : String(fileOrId || '');
+  const isGoogleDoc = isObj && (fileOrId.isGoogleDoc || fileOrId.mimeType === GOOGLE_DOC_MIME);
+
+  const url = isGoogleDoc
+    ? `${DRIVE_API}/files/${encodeURIComponent(fileId)}/export?mimeType=text%2Fplain&supportsAllDrives=true`
+    : `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`;
+
+  const res = await driveFetch(env, url, {}, licenseId);
+  const text = await res.text();
+  return text.replace(/^\uFEFF/, '');
 }
 
 function guessMimeType(filename) {
@@ -464,7 +494,8 @@ export async function downloadMediaBlob(env, file, licenseId = null) {
   return new Blob([buf], { type: mime });
 }
 
-export async function updateTextFile(env, fileId, text, licenseId = null) {
+export async function updateTextFile(env, fileOrId, text, licenseId = null) {
+  const fileId = typeof fileOrId === 'object' && fileOrId !== null ? fileOrId.id : String(fileOrId || '');
   const res = await driveFetch(
     env,
     `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=media&supportsAllDrives=true`,

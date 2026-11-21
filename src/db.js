@@ -161,6 +161,15 @@ async function initSchema(db) {
   if (!hasCol(pageCols, 'license_id')) {
     alterStmts.push(`ALTER TABLE pages ADD COLUMN license_id INTEGER`);
   }
+  if (!hasCol(pageCols, 'picture_url')) {
+    alterStmts.push(`ALTER TABLE pages ADD COLUMN picture_url TEXT`);
+  }
+  if (!hasCol(pageCols, 'last_drive_sync_at')) {
+    alterStmts.push(`ALTER TABLE pages ADD COLUMN last_drive_sync_at TEXT`);
+  }
+  if (!hasCol(pageCols, 'last_drive_sync_error')) {
+    alterStmts.push(`ALTER TABLE pages ADD COLUMN last_drive_sync_error TEXT`);
+  }
   if (!hasCol(eventCols, 'license_id')) {
     alterStmts.push(`ALTER TABLE events ADD COLUMN license_id INTEGER`);
   }

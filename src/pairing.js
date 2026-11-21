@@ -91,11 +91,19 @@ export function removeCaptionBlock(rawText, captionNumber) {
   return { updatedText, removed: true };
 }
 
-export function selectNextPair({ mediaFiles, captionsText, blockedFileIds = new Set() }) {
+export function selectPairsOrdered({
+  mediaFiles,
+  captionsText,
+  blockedFileIds = new Set(),
+  excludeFileIds = new Set(),
+  excludeCaptionNumbers = new Set(),
+  limit = 50,
+}) {
   const { blocks, duplicates } = parseCaptionsTxt(captionsText);
 
   const captionMap = new Map();
   for (const b of blocks) {
+    if (excludeCaptionNumbers.has(b.number)) continue;
     if (!captionMap.has(b.number)) {
       captionMap.set(b.number, b);
     }
@@ -106,6 +114,9 @@ export function selectNextPair({ mediaFiles, captionsText, blockedFileIds = new 
   const blockedSkipped = [];
 
   for (const f of mediaFiles) {
+    if (excludeFileIds.has(f.id)) {
+      continue;
+    }
     if (blockedFileIds.has(f.id)) {
       blockedSkipped.push({ id: f.id, name: f.name });
       continue;
@@ -140,19 +151,19 @@ export function selectNextPair({ mediaFiles, captionsText, blockedFileIds = new 
   const mediaNums = Array.from(validMediaByNum.keys()).sort((a, b) => a - b);
   const captionNums = Array.from(captionMap.keys()).sort((a, b) => a - b);
 
-  let selectedPair = null;
+  const pairs = [];
   const orphanFiles = [];
   const orphanCaptions = [];
 
   for (const num of mediaNums) {
     const filesForNum = validMediaByNum.get(num);
     if (captionMap.has(num)) {
-      if (!selectedPair) {
-        selectedPair = {
+      if (pairs.length < limit) {
+        pairs.push({
           number: num,
           file: filesForNum[0],
           caption: captionMap.get(num),
-        };
+        });
       }
       if (filesForNum.length > 1) {
         for (let i = 1; i < filesForNum.length; i++) {
@@ -177,7 +188,8 @@ export function selectNextPair({ mediaFiles, captionsText, blockedFileIds = new 
   }
 
   return {
-    pair: selectedPair,
+    pair: pairs[0] || null,
+    pairs,
     orphanFiles,
     orphanCaptions,
     invalidMediaFiles,
@@ -186,4 +198,8 @@ export function selectNextPair({ mediaFiles, captionsText, blockedFileIds = new 
     totalMediaFiles: mediaFiles.length,
     totalCaptions: blocks.length,
   };
+}
+
+export function selectNextPair(opts) {
+  return selectPairsOrdered({ ...opts, limit: opts?.limit ?? 25 });
 }

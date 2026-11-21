@@ -49,9 +49,12 @@ export async function fetchMe(env, userToken) {
 export async function fetchTokenIdentity(env, token, expectedMode = 'user') {
   const version = getGraphVersion(env);
   if (expectedMode === 'page') {
-    const res = await fetch(`https://graph.facebook.com/${version}/me?fields=id,name,category`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(
+      `https://graph.facebook.com/${version}/me?fields=id,name,category,picture.type(large){url}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error || !data.id) {
       const info = classifyFacebookError(res.status, data);
@@ -71,17 +74,18 @@ export async function fetchTokenIdentity(env, token, expectedMode = 'user') {
       id: String(data.id),
       name: data.name || `Page ${data.id}`,
       category: data.category || '',
+      pictureUrl: data?.picture?.data?.url || '',
     };
   }
 
   const me = await fetchMe(env, token);
-  return { kind: 'user', id: me.id, name: me.name };
+  return { kind: 'user', id: me.id, name: me.name, pictureUrl: '' };
 }
 
 export async function fetchUserPages(env, userToken) {
   const version = getGraphVersion(env);
   const pages = [];
-  let nextUrl = `https://graph.facebook.com/${version}/me/accounts?fields=id,name,access_token,tasks&limit=100`;
+  let nextUrl = `https://graph.facebook.com/${version}/me/accounts?fields=id,name,access_token,tasks,picture.type(large){url}&limit=100`;
 
   for (let i = 0; i < 10 && nextUrl; i++) {
     const res = await fetch(nextUrl, {
@@ -109,6 +113,7 @@ export async function fetchUserPages(env, userToken) {
             name: p.name || `Page ${p.id}`,
             access_token: p.access_token,
             tasks: Array.isArray(p.tasks) ? p.tasks : [],
+            picture_url: p?.picture?.data?.url || '',
           });
         }
       }

@@ -14,7 +14,7 @@ import {
   postPhotoToPage,
   postVideoToPage,
 } from './facebook.js';
-import { removeCaptionBlock, selectNextPair } from './pairing.js';
+import { removeCaptionBlock, selectNextPair, selectPairsOrdered } from './pairing.js';
 import {
   dateDiffDays,
   getLocalParts,
@@ -155,9 +155,10 @@ async function insertPlanRowsBatch(db, rows) {
   await db.batch(stmts);
 }
 
-export async function regenerateTodayPlanForPage(env, page) {
+export async function regenerateTodayPlanForPage(env, page, oldLocalDate = null) {
   const nowMs = Date.now();
   const localDateStr = getLocalParts(nowMs, page.timezone).localDate;
+  const staleCutoffUtc = new Date(nowMs - 36 * 3600_000).toISOString();
 
   const existing = await env.DB.prepare(
     `SELECT id, status, planned_utc FROM plan WHERE page_id = ? AND local_date = ?`
@@ -172,10 +173,16 @@ export async function regenerateTodayPlanForPage(env, page) {
     }
   }
 
+  // Delete unattempted pending/skipped rows for current date, previous timezone date, or recent horizon
+  const oldDateMatch = oldLocalDate || localDateStr;
   await env.DB.prepare(
-    `DELETE FROM plan WHERE page_id = ? AND local_date = ? AND status IN ('pending', 'skipped') AND attempts = 0`
+    `DELETE FROM plan
+     WHERE page_id = ?
+       AND status IN ('pending', 'skipped')
+       AND attempts = 0
+       AND (local_date = ? OR local_date = ? OR planned_utc >= ?)`
   )
-    .bind(page.id, localDateStr)
+    .bind(page.id, localDateStr, oldDateMatch, staleCutoffUtc)
     .run();
 
   const newRows = buildPlanRowsForPage(page, localDateStr, nowMs, keepTimes);
@@ -186,7 +193,12 @@ export async function regenerateTodayPlanForPage(env, page) {
   await insertPlanRowsBatch(env.DB, filtered);
 }
 
-async function loadDriveInputsForPage(env, page, blockedFileIds) {
+async function loadDriveInputsForPage(
+  env,
+  page,
+  blockedFileIds,
+  { excludeFileIds = new Set(), excludeCaptionNumbers = new Set(), limit = 50 } = {}
+) {
   if (!page.captions_folder_id || !page.media_folder_id) {
     const err = new Error('Google Drive captions or media folder is not configured');
     err.isConfigError = true;
@@ -204,13 +216,20 @@ async function loadDriveInputsForPage(env, page, blockedFileIds) {
       captionsFile: null,
       captionsText: '',
       mediaFiles,
-      selection: selectNextPair({ mediaFiles, captionsText: '', blockedFileIds }),
+      selection: selectPairsOrdered({ mediaFiles, captionsText: '', blockedFileIds, excludeFileIds, excludeCaptionNumbers, limit }),
       missingCaptionsTxt: true,
     };
   }
 
-  const captionsText = await downloadTextFile(env, captionsFile.id, licenseId);
-  const selection = selectNextPair({ mediaFiles, captionsText, blockedFileIds });
+  const captionsText = await downloadTextFile(env, captionsFile, licenseId);
+  const selection = selectPairsOrdered({
+    mediaFiles,
+    captionsText,
+    blockedFileIds,
+    excludeFileIds,
+    excludeCaptionNumbers,
+    limit,
+  });
 
   return {
     captionsFile,
@@ -218,6 +237,107 @@ async function loadDriveInputsForPage(env, page, blockedFileIds) {
     mediaFiles,
     selection,
     missingCaptionsTxt: false,
+  };
+}
+
+export async function syncDriveQueueForPage(env, page, { force = false } = {}) {
+  if (!page.captions_folder_id || !page.media_folder_id) {
+    return { synced: false, skippedReason: 'no_folders' };
+  }
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const localDateStr = getLocalParts(nowMs, page.timezone).localDate;
+
+  const [planRes, blockedRes] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT id, status, file_id, file_name, caption_number, planned_utc
+       FROM plan
+       WHERE page_id = ? AND local_date = ?
+       ORDER BY planned_utc ASC`
+    ).bind(page.id, localDateStr),
+    env.DB.prepare(`SELECT file_id FROM blocked_files WHERE page_id = ?`).bind(page.id),
+  ]);
+
+  const rows = planRes.results || [];
+  const pendingSlots = rows.filter((r) => r.status === 'pending');
+  const unfilled = pendingSlots.filter((r) => !r.file_id);
+
+  // Stop rule: if all pending slots already have queued Drive items, do not re-sync unless forced manually
+  if (!force && (pendingSlots.length === 0 || unfilled.length === 0)) {
+    return {
+      synced: false,
+      skippedReason: pendingSlots.length === 0 ? 'no_pending_slots' : 'all_slots_filled',
+      pendingCount: pendingSlots.length,
+      filledCount: pendingSlots.length - unfilled.length,
+    };
+  }
+
+  const excludeFileIds = new Set();
+  const excludeCaptionNumbers = new Set();
+  for (const r of rows) {
+    if (r.status === 'posted' || r.status === 'posting') {
+      if (r.file_id) excludeFileIds.add(r.file_id);
+      if (r.caption_number != null) excludeCaptionNumbers.add(Number(r.caption_number));
+    }
+  }
+  const blockedIds = new Set((blockedRes.results || []).map((b) => b.file_id));
+
+  let inputs;
+  try {
+    inputs = await loadDriveInputsForPage(env, page, blockedIds, {
+      excludeFileIds,
+      excludeCaptionNumbers,
+      limit: Math.max(25, pendingSlots.length + 5),
+    });
+  } catch (err) {
+    await env.DB.prepare(
+      `UPDATE pages SET last_drive_sync_at = ?, last_drive_sync_error = ?, updated_at = ? WHERE id = ?`
+    )
+      .bind(nowIso, err.message, nowIso, page.id)
+      .run();
+    return { synced: false, error: err.message };
+  }
+
+  const pairs = inputs.selection.pairs || [];
+  const stmts = [];
+  for (let i = 0; i < pendingSlots.length; i++) {
+    const slot = pendingSlots[i];
+    const pair = pairs[i] || null;
+    if (pair) {
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE plan SET file_id = ?, file_name = ?, caption_number = ?, caption_text = ? WHERE id = ?`
+        ).bind(pair.file.id, pair.file.name, pair.number, pair.caption.text, slot.id)
+      );
+    } else if (slot.file_id) {
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE plan SET file_id = NULL, file_name = NULL, caption_number = NULL, caption_text = NULL WHERE id = ?`
+        ).bind(slot.id)
+      );
+    }
+  }
+
+  const syncErrMsg = inputs.missingCaptionsTxt
+    ? 'Captions file (captions.txt / caption.txt / Google Doc) not found'
+    : null;
+  stmts.push(
+    env.DB.prepare(
+      `UPDATE pages SET last_drive_sync_at = ?, last_drive_sync_error = ? WHERE id = ?`
+    ).bind(nowIso, syncErrMsg, page.id)
+  );
+
+  if (stmts.length > 0) {
+    await env.DB.batch(stmts);
+  }
+
+  return {
+    synced: true,
+    pendingCount: pendingSlots.length,
+    filledCount: Math.min(pendingSlots.length, pairs.length),
+    availablePairs: pairs.length,
+    missingCaptionsTxt: inputs.missingCaptionsTxt,
   };
 }
 
@@ -258,13 +378,13 @@ export async function previewNextPostForPage(env, pageId) {
   const inputs = await loadDriveInputsForPage(env, pageRow, blockedIds);
 
   if (inputs.missingCaptionsTxt) {
-    warnings.push('captions.txt was not found in the selected Captions folder.');
+    warnings.push('No captions file (captions.txt, caption.txt, or Google Doc) was found in the Captions folder.');
   } else if (inputs.captionsFile && inputs.captionsFile.capabilities?.canEdit === false) {
-    warnings.push('captions.txt is view-only. Grant Editor permission on Google Drive so RM Automation can update it.');
+    warnings.push(`${inputs.captionsFile.name} is view-only. Grant Editor permission on Google Drive so RM Automation can update it.`);
   }
 
   if (inputs.selection.duplicateCaptions.length > 0) {
-    warnings.push(`Duplicate caption numbers in captions.txt: ${inputs.selection.duplicateCaptions.join(', ')}`);
+    warnings.push(`Duplicate caption numbers: ${inputs.selection.duplicateCaptions.join(', ')}`);
   }
   if (inputs.selection.orphanFiles.length > 0) {
     warnings.push(`${inputs.selection.orphanFiles.length} orphan media file(s) without matching caption.`);
@@ -307,21 +427,21 @@ export async function previewNextPostForPage(env, pageId) {
 export async function executeCleanupForItem(env, page, item) {
   const licenseId = page.license_id ?? null;
   try {
-    // Step (2): Re-read captions.txt right before writing, remove caption block, upload with uploadType=media
+    // Step (2): Re-read captions file right before writing, remove caption block, upload with uploadType=media
     if (page.captions_folder_id && item.caption_number != null) {
       const captionsFile = await findCaptionsFile(env, page.captions_folder_id, licenseId);
       if (captionsFile) {
-        let latestText = await downloadTextFile(env, captionsFile.id, licenseId);
+        let latestText = await downloadTextFile(env, captionsFile, licenseId);
         let { updatedText, removed } = removeCaptionBlock(latestText, item.caption_number);
         if (removed) {
           try {
-            await updateTextFile(env, captionsFile.id, updatedText, licenseId);
+            await updateTextFile(env, captionsFile, updatedText, licenseId);
           } catch (uploadErr) {
             // Re-read and re-apply once if concurrent modification or transient Drive error occurred
-            latestText = await downloadTextFile(env, captionsFile.id, licenseId);
+            latestText = await downloadTextFile(env, captionsFile, licenseId);
             const retryResult = removeCaptionBlock(latestText, item.caption_number);
             if (retryResult.removed) {
-              await updateTextFile(env, captionsFile.id, retryResult.updatedText, licenseId);
+              await updateTextFile(env, captionsFile, retryResult.updatedText, licenseId);
             }
           }
         }
@@ -394,9 +514,27 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
     return { status: 'failed', error: err.message };
   }
 
+  // Guard against picking an item already posted/posting today if Drive cleanup lagged
+  const todayRowsRes = await env.DB.prepare(
+    `SELECT id, file_id, caption_number FROM plan
+     WHERE page_id = ? AND local_date = ? AND status IN ('posted', 'posting') AND id != ?`
+  )
+    .bind(page.id, item.local_date, item.id)
+    .all();
+
+  const excludeFileIds = new Set();
+  const excludeCaptionNumbers = new Set();
+  for (const r of todayRowsRes.results || []) {
+    if (r.file_id) excludeFileIds.add(r.file_id);
+    if (r.caption_number != null) excludeCaptionNumbers.add(Number(r.caption_number));
+  }
+
   let inputs;
   try {
-    inputs = await loadDriveInputsForPage(env, page, blockedFileIds);
+    inputs = await loadDriveInputsForPage(env, page, blockedFileIds, {
+      excludeFileIds,
+      excludeCaptionNumbers,
+    });
   } catch (err) {
     if (err.isConfigError) {
       await env.DB.batch([
@@ -432,8 +570,19 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
 
   // Loop so that >100 MB files get blocked immediately and we try the next pair
   let attemptSelection = inputs.selection;
-  while (attemptSelection.pair) {
-    const { file, caption, number } = attemptSelection.pair;
+  const pickPairFromSelection = (sel) => {
+    if (item.file_id && sel.pairs?.length) {
+      const preAssigned = sel.pairs.find(
+        (pr) => pr.file.id === item.file_id && (item.caption_number == null || pr.number === Number(item.caption_number))
+      );
+      if (preAssigned) return preAssigned;
+    }
+    return sel.pair;
+  };
+
+  let currentPair = pickPairFromSelection(attemptSelection);
+  while (currentPair) {
+    const { file, caption, number } = currentPair;
 
     // Save chosen file + caption metadata BEFORE posting so stuck-posting reconciliation can inspect it
     await env.DB.prepare(
@@ -471,7 +620,10 @@ async function executeClaimedItem(env, page, item, blockedFileIds) {
           mediaFiles: inputs.mediaFiles,
           captionsText: inputs.captionsText,
           blockedFileIds,
+          excludeFileIds,
+          excludeCaptionNumbers,
         });
+        currentPair = attemptSelection.pair;
         continue;
       }
 
@@ -909,6 +1061,7 @@ export async function runCron(env) {
   const maxPosts = Math.max(1, Number(env.MAX_POSTS_PER_RUN || 3));
   const candidateEntries = shuffleInPlace(Array.from(dueByPage.entries())).slice(0, maxPosts);
 
+  const dispatchedPageIds = new Set();
   for (const [pageId, item] of candidateEntries) {
     const page = pagesById.get(pageId);
     // Exactly-once claim: require changes === 1
@@ -922,10 +1075,48 @@ export async function runCron(env) {
       continue;
     }
 
+    dispatchedPageIds.add(page.id);
     item.status = 'posting';
     item.claimed_at = nowIso;
     const blockedIds = blockedByPage.get(page.id) || new Set();
     await executeClaimedItem(env, page, item, blockedIds);
+  }
+
+  // Smart pre-sync (pre-post check <=12m before due OR hourly sync) ONLY for pages with unfilled pending slots
+  const preSyncWindowIso = new Date(nowMs + 12 * 60_000).toISOString();
+  const hourAgoMs = nowMs - 60 * 60_000;
+  const syncCandidates = [];
+
+  for (const page of activePages) {
+    if (dispatchedPageIds.has(page.id)) continue;
+    if (!page.captions_folder_id || !page.media_folder_id) continue;
+
+    const localDateStr = getLocalParts(nowMs, page.timezone).localDate;
+    const unfilledSlots = allPlans.filter(
+      (r) => r.page_id === page.id && r.local_date === localDateStr && r.status === 'pending' && !r.file_id
+    );
+    if (unfilledSlots.length === 0) continue; // Stop rule: all pending slots already queued!
+
+    const earliestUnfilled = unfilledSlots.reduce(
+      (min, r) => (r.planned_utc < min ? r.planned_utc : min),
+      unfilledSlots[0].planned_utc
+    );
+    const isDueSoon = earliestUnfilled <= preSyncWindowIso;
+    const lastSyncMs = page.last_drive_sync_at ? Date.parse(page.last_drive_sync_at) : 0;
+    const isHourlyDue = !lastSyncMs || Number.isNaN(lastSyncMs) || lastSyncMs <= hourAgoMs;
+
+    if (isDueSoon || isHourlyDue) {
+      syncCandidates.push({ page, isDueSoon, lastSyncMs: lastSyncMs || 0 });
+    }
+  }
+
+  syncCandidates.sort((a, b) => {
+    if (a.isDueSoon !== b.isDueSoon) return a.isDueSoon ? -1 : 1;
+    return a.lastSyncMs - b.lastSyncMs;
+  });
+
+  for (const c of syncCandidates.slice(0, 2)) {
+    await syncDriveQueueForPage(env, c.page, { force: false }).catch(() => null);
   }
 
   // Occasionally prune event logs older than 30 days (~every hour at minute 0)

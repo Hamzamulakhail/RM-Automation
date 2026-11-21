@@ -3,21 +3,22 @@ import {
   esc,
   formatExactUtc,
   formatRelativeTime,
+  formatTime12h,
   minutesFromHHMM,
 } from './api.js';
 import { translate } from './i18n.js';
 import { getAvatarGradient, getInitials, icons, illustrations } from './icons.js';
 
 export const COMMON_TIMEZONES = [
+  'Asia/Kabul',
+  'Asia/Dubai',
+  'Asia/Karachi',
   'America/New_York',
   'America/Chicago',
   'America/Denver',
   'America/Los_Angeles',
   'Europe/London',
   'Europe/Berlin',
-  'Asia/Kabul',
-  'Asia/Dubai',
-  'Asia/Karachi',
   'Asia/Kolkata',
   'UTC',
 ];
@@ -30,17 +31,31 @@ export const ACCENT_PRESETS = [
   { id: 'rose', c1: '#f43f5e', c2: '#ec4899' },
 ];
 
+export function renderAvatar(name, pictureUrl = '', sizePx = 36) {
+  const fontSize = sizePx <= 28 ? 11 : sizePx >= 42 ? 15 : 13;
+  return `
+    <span class="avatar-circle" style="width:${sizePx}px;height:${sizePx}px;font-size:${fontSize}px;background:${getAvatarGradient(name)}">
+      <span class="avatar-initials">${esc(getInitials(name))}</span>
+      ${
+        pictureUrl
+          ? `<img class="avatar-img" src="${esc(pictureUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()" />`
+          : ''
+      }
+    </span>
+  `;
+}
+
 export function renderStatusBadge(status, label) {
   let iconHtml = icons.info();
   if (status === 'active' || status === 'posted' || status === 'used') {
     iconHtml = icons.checkCircle();
   } else if (status === 'posting') {
     iconHtml = icons.spinner();
-  } else if (status === 'paused' || status === 'retrying' || status === 'warn') {
-    iconHtml = status === 'warn' ? icons.alertTriangle() : icons.pause();
+  } else if (status === 'paused' || status === 'retrying' || status === 'warn' || status === 'pending') {
+    iconHtml = status === 'warn' ? icons.alertTriangle() : status === 'pending' ? icons.clock() : icons.pause();
   } else if (status === 'needs_attention' || status === 'failed' || status === 'revoked' || status === 'error') {
     iconHtml = status === 'failed' || status === 'error' ? icons.xCircle() : icons.alertTriangle();
-  } else if (status === 'pending' || status === 'missed' || status === 'skipped' || status === 'expired') {
+  } else if (status === 'missed' || status === 'skipped' || status === 'expired') {
     iconHtml = icons.clock();
   }
   return `<span class="badge badge-${esc(status)}">${iconHtml}<span>${esc(label)}</span></span>`;
@@ -125,17 +140,19 @@ export function renderHeroToday(pages, globalPause, lang) {
             <circle class="ring-track" cx="39" cy="39" r="${r}"/>
             <circle class="ring-fill" cx="39" cy="39" r="${r}" stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}"/>
           </svg>
-          <span class="ring-center-label ltr">${pct}%</span>
+          <span class="ring-center-label ltr tabular">${pct}%</span>
         </div>
         <div class="stack-sm">
           <h2 class="section-title">${esc(t('heroTodayTitle'))}</h2>
-          <div class="muted small-text">${esc(t('heroPostedOfPlanned', { posted, total: planned }))}</div>
-          <div class="muted" style="font-size:12px">${esc(t('heroTodaySubtitle'))}</div>
+          <div class="hero-meta-line">
+            <span class="tabular">${esc(t('heroPostedOfPlanned', { posted, total: planned }))}</span>
+            <span aria-hidden="true">·</span>
+            <span class="tabular">${pages.length} ${esc(t('statTotalPages'))}</span>
+          </div>
         </div>
       </div>
       <div class="row-start">
         ${healthBadge}
-        <span class="badge badge-neutral ltr">${pages.length} ${esc(t('statTotalPages'))}</span>
       </div>
     </section>
   `;
@@ -206,7 +223,7 @@ export function renderSummaryTiles(pages, sparklines, lang) {
             <span class="stat-icon">${tile.icon}</span>
           </div>
           <div class="stat-bottom">
-            <div class="stat-value ltr" data-countup="${tile.value}">${tile.value}</div>
+            <div class="stat-value ltr tabular" data-countup="${tile.value}">${tile.value}</div>
             ${tile.series ? renderSparklineSvg(tile.series, tile.stroke) : ''}
           </div>
         </div>`
@@ -224,6 +241,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
   const nextRel = nextUtc ? formatRelativeTime(nextUtc, lang) : '';
   const postBusy = busyMap.has(`post:${p.id}`);
   const pauseBusy = busyMap.has(`pause:${p.id}`);
+  const syncBusy = busyMap.has(`sync:${p.id}`);
 
   const todaySlots = p.today_slots || [];
   const postedCnt = todaySlots.filter((s) => s.status === 'posted').length;
@@ -241,6 +259,8 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
       ? todaySlots.find((s) => String(s.id) === String(activePopover.slotId))
       : null;
 
+  const nextQueuedFile = todaySlots.find((s) => s.status === 'pending' && s.file_name)?.file_name || '';
+
   return `
     <article class="card page-card" data-page-id="${p.id}" style="--stagger:${Math.min(idx, 10)}">
       <div class="card-header">
@@ -249,7 +269,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
             <circle class="avatar-ring-track" cx="22" cy="22" r="${avR}"/>
             <circle class="avatar-ring-fill" cx="22" cy="22" r="${avR}" style="stroke:${ringStroke}" stroke-dasharray="${avCirc.toFixed(1)}" stroke-dashoffset="${avOffset.toFixed(1)}"/>
           </svg>
-          <div class="avatar-circle" style="background:${getAvatarGradient(p.name)}">${esc(getInitials(p.name))}</div>
+          ${renderAvatar(p.name, p.picture_url, 36)}
         </div>
         <div class="card-title-wrap">
           <h3 class="card-title">${esc(p.name)}</h3>
@@ -265,17 +285,26 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
       <div class="page-time-row">
         <div class="meta-pair">
           <span class="muted">${esc(t('localTimeNow'))}</span>
-          <strong class="ltr">${esc(p.local_time)}</strong>
+          <strong class="ltr tabular">${esc(formatTime12h(p.local_time))}</strong>
         </div>
         <div class="meta-pair">
           <span class="muted">${esc(t('nextPlanned'))}</span>
           ${
             p.next_planned
-              ? `<strong class="rel-time ltr" title="${esc(formatExactUtc(nextUtc))}">${esc(p.next_planned.planned_local)} · ${esc(nextRel)}</strong>`
+              ? `<strong class="rel-time ltr tabular" title="${esc(formatExactUtc(nextUtc))}">${esc(formatTime12h(p.next_planned.planned_local))} · ${esc(nextRel)}</strong>`
               : `<span class="muted">${esc(t('noNextPlanned'))}</span>`
           }
         </div>
       </div>
+
+      ${
+        nextQueuedFile
+          ? `<div class="queued-file-line">
+              <span class="muted">${esc(t('queuedFileLabel'))}:</span>
+              <span class="ltr queued-file-name">${esc(nextQueuedFile)}</span>
+            </div>`
+          : ''
+      }
 
       ${!hasFolders ? `<div class="inline-alert inline-alert-warn">${icons.alertTriangle()}<span>${esc(t('folderNotSet'))}</span></div>` : ''}
       ${p.last_error ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span><strong>${esc(t('lastError'))}:</strong> ${esc(p.last_error)}</span></div>` : ''}
@@ -283,7 +312,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
       <div class="timeline-24-wrap">
         <div class="timeline-24-head">
           <span>${esc(t('todaySlots'))}</span>
-          <span class="ltr">00:00 — 24:00</span>
+          <span class="ltr tabular">12 AM — 12 PM — 12 AM</span>
         </div>
         ${
           todaySlots.length === 0
@@ -292,7 +321,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
                 <div class="timeline-24-axis">
                   ${
                     nowPct !== null
-                      ? `<span class="timeline-now-line" style="inset-inline-start:${nowPct.toFixed(1)}%" title="${esc(t('nowMarker'))}: ${esc(p.local_time)}"></span>`
+                      ? `<span class="timeline-now-line" style="inset-inline-start:${nowPct.toFixed(1)}%" title="${esc(t('nowMarker'))}: ${esc(formatTime12h(p.local_time))}"></span>`
                       : ''
                   }
                   ${todaySlots
@@ -302,6 +331,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
                       const stCls = s.status === 'pending' && Number(s.attempts) > 0 ? 'retrying' : s.status;
                       const stLabel =
                         stCls === 'retrying' ? `${t('slot_retrying')} (${s.attempts}/5)` : t(`slot_${s.status}`);
+                      const t12 = formatTime12h(s.planned_local);
                       return `
                         <button
                           type="button"
@@ -310,8 +340,8 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
                           data-action="inspect-slot"
                           data-page-id="${p.id}"
                           data-slot-id="${s.id}"
-                          aria-label="${esc(s.planned_local)} · ${esc(stLabel)}"
-                          title="${esc(s.planned_local)} · ${esc(stLabel)}${s.file_name ? ` · ${s.file_name}` : ''}"
+                          aria-label="${esc(t12)} · ${esc(stLabel)}"
+                          title="${esc(t12)} · ${esc(stLabel)}${s.file_name ? ` · ${s.file_name}` : ''}"
                         ></button>`;
                     })
                     .join('')}
@@ -322,7 +352,7 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
           selectedSlot
             ? `<div class="slot-popover" role="region" aria-label="Slot details">
                 <div class="row">
-                  <strong class="ltr">${esc(selectedSlot.planned_local)}</strong>
+                  <strong class="ltr tabular">${esc(formatTime12h(selectedSlot.planned_local))}</strong>
                   ${renderStatusBadge(
                     selectedSlot.status === 'pending' && Number(selectedSlot.attempts) > 0 ? 'retrying' : selectedSlot.status,
                     t(`slot_${selectedSlot.status}`)
@@ -345,10 +375,14 @@ export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
           ${pauseBusy ? icons.spinner() : isPaused ? icons.play() : icons.pause()}
           <span>${esc(isPaused ? t('resumePage') : t('pausePage'))}</span>
         </button>
-        <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="preview">
-          ${icons.eye()}
-          <span>${esc(t('previewNext'))}</span>
-        </button>
+        ${
+          hasFolders
+            ? `<button class="btn btn-sm" data-action="sync-page-drive" data-id="${p.id}" ${syncBusy ? 'disabled' : ''}>
+                ${syncBusy ? icons.spinner() : icons.refresh()}
+                <span>${esc(t('syncDriveBtn'))}</span>
+              </button>`
+            : ''
+        }
         <button class="btn btn-sm btn-primary" data-action="confirm-post-now" data-id="${p.id}" data-name="${esc(p.name)}" ${postBusy ? 'disabled' : ''}>
           ${postBusy ? icons.spinner() : icons.send()}
           <span>${esc(t('postNow'))}</span>
@@ -375,7 +409,7 @@ function renderScheduleVisualBar(slots, jitterMinutes, lang) {
       const widthPct = Math.min(100 - startPct, pct + jPct - startPct);
       return `
         ${jitter > 0 ? `<span class="sched-jitter" style="left:${startPct.toFixed(1)}%;width:${widthPct.toFixed(1)}%"></span>` : ''}
-        <span class="sched-pin" style="left:${pct.toFixed(1)}%" title="${esc(s)}"></span>
+        <span class="sched-pin" style="left:${pct.toFixed(1)}%" title="${esc(formatTime12h(s))}"></span>
       `;
     })
     .join('');
@@ -384,7 +418,7 @@ function renderScheduleVisualBar(slots, jitterMinutes, lang) {
     <div class="sched-visual-box">
       <div class="muted small-text">${esc(translate(lang, 'schedule24hBar'))}</div>
       <div class="sched-track ltr">${pins}</div>
-      <div class="sched-hours ltr"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+      <div class="sched-hours ltr tabular"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>12 AM</span></div>
     </div>
   `;
 }
@@ -395,7 +429,7 @@ function renderStepper(id, label, value, min, max) {
       <label for="${esc(id)}">${esc(label)}</label>
       <div class="stepper ltr">
         <button type="button" class="stepper-btn" data-action="step" data-target="${esc(id)}" data-delta="-1" data-min="${min}" data-max="${max}" aria-label="Decrease ${esc(label)}">${icons.minus()}</button>
-        <input id="${esc(id)}" type="number" min="${min}" max="${max}" class="input ltr" value="${value}" />
+        <input id="${esc(id)}" type="number" min="${min}" max="${max}" class="input ltr tabular" value="${value}" />
         <button type="button" class="stepper-btn" data-action="step" data-target="${esc(id)}" data-delta="1" data-min="${min}" data-max="${max}" aria-label="Increase ${esc(label)}">${icons.plus()}</button>
       </div>
     </div>
@@ -430,21 +464,27 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
   const hasViewOnly = (capObj && !capObj.canEdit) || (medObj && !medObj.canEdit);
   const isCustomTz = !COMMON_TIMEZONES.includes(p.timezone);
   const saving = busyMap.has(`save:${p.id}`);
+  const syncing = busyMap.has(`sync:${p.id}`);
 
   let tabContent = '';
 
   if (drawer.tab === 'schedule') {
+    const effectiveCap = drawer.customCap ? p.daily_cap : Math.max(1, drawer.slots.length || 1);
     const summaryText = buildScheduleSummary(
       {
         slots: drawer.slots,
         jitter: p.jitter_minutes,
-        dailyCap: p.daily_cap,
+        dailyCap: effectiveCap,
         minGap: p.min_gap_minutes,
         rampEnabled: p.ramp_up_enabled,
         rampStart: p.ramp_start,
       },
       lang
     );
+
+    const period = drawer.newSlotPeriod === 'AM' ? 'AM' : 'PM';
+    const selHour = Number(drawer.newSlotHour || 8);
+    const selMin = Number(drawer.newSlotMinute ?? 0);
 
     tabContent = `
       <form id="drawerScheduleForm" class="stack">
@@ -481,7 +521,7 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
           </div>
           <div class="field" id="customTzWrap" style="${isCustomTz ? '' : 'display:none'}">
             <label for="editTzCustom">IANA Timezone</label>
-            <input id="editTzCustom" class="input ltr" value="${esc(p.timezone)}" placeholder="America/New_York" />
+            <input id="editTzCustom" class="input ltr" value="${esc(p.timezone)}" placeholder="Asia/Kabul" />
           </div>
         </div>
 
@@ -492,42 +532,86 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
               .map(
                 (s, idx) => `
               <span class="slot-chip">
-                <span class="ltr">${esc(s)}</span>
-                <button type="button" data-action="remove-slot" data-idx="${idx}" aria-label="Remove ${esc(s)}">×</button>
+                <span class="ltr tabular">${esc(formatTime12h(s))}</span>
+                <button type="button" data-action="remove-slot" data-idx="${idx}" aria-label="Remove ${esc(formatTime12h(s))}">×</button>
               </span>`
               )
               .join('')}
           </div>
-          <div class="row-start">
-            <input id="newSlotInput" type="time" class="input ltr" style="width:auto" value="16:00" />
-            <button type="button" id="addSlotBtn" class="btn btn-sm">${icons.plus()}<span>${esc(t('addSlotBtn'))}</span></button>
+
+          <div class="time12-builder ltr">
+            <select id="newSlotHour" class="select time12-select" aria-label="${esc(t('hourLabel'))}">
+              ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                .map((h) => `<option value="${h}" ${selHour === h ? 'selected' : ''}>${h}</option>`)
+                .join('')}
+            </select>
+            <span class="time12-colon">:</span>
+            <select id="newSlotMinute" class="select time12-select" aria-label="${esc(t('minuteLabel'))}">
+              ${Array.from({ length: 60 }, (_, m) => m)
+                .map((m) => `<option value="${m}" ${selMin === m ? 'selected' : ''}>${String(m).padStart(2, '0')}</option>`)
+                .join('')}
+            </select>
+            <div class="seg-group time12-ampm" role="group" aria-label="${esc(t('ampmLabel'))}">
+              <button type="button" class="seg-btn ${period === 'AM' ? 'active' : ''}" data-action="set-slot-period" data-val="AM">AM</button>
+              <button type="button" class="seg-btn ${period === 'PM' ? 'active' : ''}" data-action="set-slot-period" data-val="PM">PM</button>
+            </div>
+            <button type="button" id="addSlotBtn" class="btn btn-sm btn-primary">${icons.plus()}<span>${esc(t('addSlotBtn'))}</span></button>
           </div>
-          <div class="row-start small-text muted">
+
+          <div class="row-start small-text muted" style="margin-top:4px">
             <span>${esc(t('scheduleQuickAdd'))}:</span>
-            ${['08:00', '12:00', '16:00', '20:00']
+            ${['07:00', '09:00', '12:00', '17:00', '20:00', '21:00']
               .filter((q) => !drawer.slots.includes(q))
-              .map((q) => `<button type="button" class="filter-chip ltr" data-action="quick-add-slot" data-slot="${q}">+${q}</button>`)
+              .map(
+                (q) =>
+                  `<button type="button" class="filter-chip ltr tabular" data-action="quick-add-slot" data-slot="${q}">+${esc(formatTime12h(q))}</button>`
+              )
               .join('')}
           </div>
           ${drawer.slotError ? `<div class="field-error">${esc(drawer.slotError)}</div>` : ''}
         </div>
 
-        <div class="form-grid form-grid-3">
-          ${renderStepper('editDailyCap', t('dailyCapLabel'), p.daily_cap, 1, 24)}
-          ${renderStepper('editMinGap', t('minGapLabel'), p.min_gap_minutes, 0, 720)}
+        <div class="field">
+          <div class="row">
+            <label for="editJitter">${esc(t('slotWindowLabel'))}</label>
+            <div class="chip-row">
+              ${[0, 5, 10, 15]
+                .map(
+                  (m) => `
+                <button
+                  type="button"
+                  class="filter-chip ${Number(p.jitter_minutes) === m ? 'active' : ''}"
+                  data-action="set-jitter"
+                  data-val="${m}"
+                >
+                  ${m === 0 ? esc(t('exactTimeZero')) : `<span class="ltr tabular">±${m}m</span>`}
+                </button>`
+                )
+                .join('')}
+            </div>
+          </div>
           ${renderStepper('editJitter', t('jitterLabel'), p.jitter_minutes, 0, 180)}
         </div>
 
-        <div class="subcard stack">
-          <label class="row-start" style="cursor:pointer">
-            <input id="editRampEnabled" type="checkbox" ${p.ramp_up_enabled ? 'checked' : ''} />
-            <strong>${esc(t('rampUpLabel'))}</strong>
-          </label>
-          <div class="form-grid form-grid-2">
-            ${renderStepper('editRampStart', t('rampStartLabel'), p.ramp_start, 1, 24)}
-            ${renderStepper('editRampStep', t('rampStepLabel'), p.ramp_step_days, 1, 30)}
+        <details class="adv-panel" id="advSchedulePanel" ${drawer.advOpen ? 'open' : ''}>
+          <summary class="adv-summary">${esc(t('advancedSettings'))}</summary>
+          <div class="adv-body stack">
+            <div class="muted small-text">${esc(t('unlimitedAutoCapHint'))}</div>
+            <div class="form-grid form-grid-2">
+              ${renderStepper('editDailyCap', t('dailyCapLabel'), effectiveCap, 1, 50)}
+              ${renderStepper('editMinGap', t('minGapLabel'), p.min_gap_minutes, 0, 720)}
+            </div>
+            <div class="divider"></div>
+            <label class="row-start" style="cursor:pointer">
+              <input id="editRampEnabled" type="checkbox" ${p.ramp_up_enabled ? 'checked' : ''} />
+              <strong>${esc(t('rampUpLabel'))}</strong>
+            </label>
+            <div class="form-grid form-grid-2">
+              ${renderStepper('editRampStart', t('rampStartLabel'), p.ramp_start, 1, 50)}
+              ${renderStepper('editRampStep', t('rampStepLabel'), p.ramp_step_days, 1, 30)}
+            </div>
           </div>
-        </div>
+        </details>
 
         <div class="row">
           <button type="submit" class="btn btn-primary" ${saving ? 'disabled' : ''}>
@@ -545,41 +629,28 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
     const driveMode = driveInfo?.mode || 'none';
     tabContent = `
       <div class="stack">
-        <div class="subcard stack-sm">
-          <div class="row">
-            <strong>${esc(t('googleDriveTitle'))}</strong>
-            ${
-              driveMode === 'oauth'
-                ? renderStatusBadge('active', driveInfo.googleEmail || 'Google Drive')
-                : driveMode === 'service_account'
-                  ? renderStatusBadge('info', 'Service Account')
-                  : renderStatusBadge('warn', t('noDriveConfigured'))
-            }
-          </div>
-          ${
-            driveMode === 'service_account'
-              ? `
+        ${
+          driveMode === 'service_account'
+            ? `<div class="stack-sm">
+                <strong>${esc(t('driveStep1Title'))}</strong>
                 <p class="muted small-text" style="margin:0">${esc(t('driveStep1Hint'))}</p>
                 <div class="row-start">
                   <div class="code-box ltr" style="flex:1">${esc(driveInfo.serviceAccountEmail)}</div>
                   <button type="button" class="btn btn-sm" id="copySaEmailBtn">${icons.copy()}<span>${esc(t('copyEmailBtn'))}</span></button>
+                </div>
+              </div><div class="divider"></div>`
+            : driveMode === 'none'
+              ? `<div class="inline-alert inline-alert-warn">
+                  ${icons.alertTriangle()}
+                  <div class="row" style="flex:1">
+                    <span>${esc(driveInfo?.error || t('googleNotConnected'))}</span>
+                    ${driveInfo?.googleOAuthAvailable ? `<a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>` : ''}
+                  </div>
                 </div>`
-              : driveMode === 'oauth'
-                ? `<div class="row">
-                    <span class="muted small-text">${esc(t('googleConnectedAs'))}: <strong class="ltr">${esc(driveInfo.googleEmail)}</strong></span>
-                    ${driveInfo.googleOAuthAvailable ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>` : ''}
-                  </div>`
-                : `
-                  <p class="muted small-text" style="margin:0">${esc(driveInfo?.error || t('googleNotConnected'))}</p>
-                  ${
-                    driveInfo?.googleOAuthAvailable
-                      ? `<div><a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
-                      : ''
-                  }`
-          }
-        </div>
+              : ''
+        }
 
-        <div class="subcard stack">
+        <div class="stack">
           <div class="row">
             <strong>${esc(t('driveStep2Title'))}</strong>
             <button type="button" class="btn btn-sm" id="loadFoldersBtn" ${drawer.driveFoldersLoading || !driveInfo?.configured ? 'disabled' : ''}>
@@ -623,10 +694,16 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
       <div class="stack">
         <div class="row">
           <strong>${esc(t('previewTitle'))}</strong>
-          <button type="button" class="btn btn-sm" id="refreshPreviewBtn" ${drawer.previewLoading ? 'disabled' : ''}>
-            ${drawer.previewLoading ? icons.spinner() : icons.refresh()}
-            <span>${esc(t('runPreviewBtn'))}</span>
-          </button>
+          <div class="row-start">
+            <button type="button" class="btn btn-sm" data-action="sync-page-drive" data-id="${p.id}" ${syncing ? 'disabled' : ''}>
+              ${syncing ? icons.spinner() : icons.refresh()}
+              <span>${esc(t('syncDriveBtn'))}</span>
+            </button>
+            <button type="button" class="btn btn-sm" id="refreshPreviewBtn" ${drawer.previewLoading ? 'disabled' : ''}>
+              ${drawer.previewLoading ? icons.spinner() : icons.eye()}
+              <span>${esc(t('runPreviewBtn'))}</span>
+            </button>
+          </div>
         </div>
 
         ${
@@ -636,23 +713,22 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
               ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(drawer.previewError)}</span></div>`
               : pv
                 ? `
-              <div class="inline-alert ${pv.ready ? 'inline-alert-info' : 'inline-alert-warn'}">
+              <div class="inline-alert ${pv.ready ? 'inline-alert-success' : 'inline-alert-warn'}">
                 ${pv.ready ? icons.checkCircle() : icons.alertTriangle()}
                 <strong>${esc(pv.ready ? t('previewReady') : t('previewNotReady'))}</strong>
               </div>
-              ${pv.warnings?.length ? `<div class="subcard stack-sm"><strong>${esc(t('previewWarnings'))}</strong><ul class="clean-list">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
+              ${pv.warnings?.length ? `<div class="stack-sm"><strong>${esc(t('previewWarnings'))}</strong><ul class="clean-list muted small-text">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
               ${
                 pv.pair
-                  ? `<div class="subcard stack-sm">
-                      <div><strong>${esc(t('previewFile'))}:</strong> <span class="ltr">${esc(pv.pair.fileName)}</span> (${esc(pv.pair.mediaType)}, ${(pv.pair.sizeBytes / (1024 * 1024)).toFixed(2)} MB)</div>
+                  ? `<div class="stack-sm list-item-box">
+                      <div><strong>${esc(t('previewFile'))}:</strong> <span class="ltr">${esc(pv.pair.fileName)}</span> · <span class="muted">${esc(pv.pair.mediaType)}, ${(pv.pair.sizeBytes / (1024 * 1024)).toFixed(2)} MB</span></div>
                       <div><strong>${esc(t('previewCaptionNum'))}:</strong> <span class="ltr">#${pv.pair.number}</span></div>
-                      <div><strong>${esc(t('previewCaptionText'))}:</strong></div>
                       <div class="code-box" style="white-space:pre-wrap;font-family:inherit">${esc(pv.pair.captionText)}</div>
                     </div>`
                   : ''
               }
-              ${pv.orphanFiles?.length ? `<div class="subcard"><strong>${esc(t('previewOrphanFiles'))}:</strong> <span class="ltr">${pv.orphanFiles.map((o) => esc(o.name)).join(', ')}</span></div>` : ''}
-              ${pv.orphanCaptions?.length ? `<div class="subcard"><strong>${esc(t('previewOrphanCaptions'))}:</strong> <span class="ltr">${pv.orphanCaptions.map((c) => `#${c.number}`).join(', ')}</span></div>` : ''}
+              ${pv.orphanFiles?.length ? `<div class="small-text"><strong>${esc(t('previewOrphanFiles'))}:</strong> <span class="ltr muted">${pv.orphanFiles.map((o) => esc(o.name)).join(', ')}</span></div>` : ''}
+              ${pv.orphanCaptions?.length ? `<div class="small-text"><strong>${esc(t('previewOrphanCaptions'))}:</strong> <span class="ltr muted">${pv.orphanCaptions.map((c) => `#${c.number}`).join(', ')}</span></div>` : ''}
             `
                 : ''
         }
@@ -665,11 +741,11 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
         ${
           drawer.blockedFiles.length === 0
             ? `<div class="muted small-text">${esc(t('noBlockedFiles'))}</div>`
-            : `<div class="stack-sm">${drawer.blockedFiles
+            : `<div class="flat-list">${drawer.blockedFiles
                 .map(
                   (f) => `
-                  <div class="subcard row">
-                    <div>
+                  <div class="flat-row">
+                    <div class="min-w-0">
                       <strong class="ltr">${esc(f.file_name)}</strong>
                       <div class="muted small-text">${esc(f.reason || '')}</div>
                     </div>
@@ -694,15 +770,15 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
         ${
           plans.length === 0
             ? `<div class="muted small-text">${esc(t('noHistoryYet'))}</div>`
-            : `<div class="stack-sm">${plans
+            : `<div class="flat-list">${plans
                 .map((r) => {
                   const st = r.status === 'pending' && Number(r.attempts) > 0 ? 'retrying' : r.status;
                   const lbl = st === 'retrying' ? `${t('slot_retrying')} (${r.attempts}/5)` : t(`slot_${r.status}`);
                   return `
-                    <div class="subcard row">
-                      <div>
+                    <div class="flat-row">
+                      <div class="min-w-0">
                         <div class="row-start">
-                          <span class="ltr"><strong>${esc(r.local_date)} ${esc(r.planned_local)}</strong></span>
+                          <span class="ltr tabular"><strong>${esc(r.local_date)} · ${esc(formatTime12h(r.planned_local))}</strong></span>
                           ${renderStatusBadge(st, lbl)}
                         </div>
                         ${r.file_name ? `<div class="muted small-text ltr">${esc(r.file_name)}</div>` : ''}
@@ -721,15 +797,15 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
         ${
           evs.length === 0
             ? `<div class="muted small-text">${esc(t('noHistoryYet'))}</div>`
-            : `<div class="stack-sm">${evs
+            : `<div class="flat-list">${evs
                 .map(
                   (ev) => `
-                  <div class="subcard">
+                  <div class="flat-row-col">
                     <div class="row">
                       ${renderStatusBadge(ev.level, t(`level_${ev.level}`))}
                       <span class="muted small-text" title="${esc(formatExactUtc(ev.created_at))}">${esc(formatRelativeTime(ev.created_at, lang))}</span>
                     </div>
-                    <div style="margin-top:6px;word-break:break-word">${esc(ev.message)}</div>
+                    <div style="word-break:break-word">${esc(ev.message)}</div>
                   </div>`
                 )
                 .join('')}</div>`
@@ -743,7 +819,7 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(p.name)}">
         <div class="drawer-header">
           <div class="row-start">
-            <div class="avatar-circle" style="background:${getAvatarGradient(p.name)}">${esc(getInitials(p.name))}</div>
+            ${renderAvatar(p.name, p.picture_url, 40)}
             <div>
               <h2 class="drawer-title">${esc(p.name)}</h2>
               <div class="muted small-text">${esc(p.account_name)} · <span class="ltr">${esc(p.timezone)}</span></div>
@@ -774,6 +850,136 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
   `;
 }
 
+export function renderPostsView(state, lang, busyMap) {
+  const t = (k) => translate(lang, k);
+  const { pages } = state.dashboard;
+  const f = state.postFilters || { status: '', pageId: '' };
+  const syncingAll = busyMap.has('sync-all-posts');
+
+  const allPosts = state.posts || [];
+  const filtered = allPosts.filter((item) => {
+    if (f.pageId && String(item.page_id) !== f.pageId) return false;
+    if (f.status === 'pending' && item.status !== 'pending' && item.status !== 'posting') return false;
+    if (f.status === 'posted' && item.status !== 'posted') return false;
+    if (f.status === 'failed' && item.status !== 'failed' && item.status !== 'skipped' && item.status !== 'missed') {
+      return false;
+    }
+    return true;
+  });
+
+  const pendingCnt = allPosts.filter((i) => i.status === 'pending' || i.status === 'posting').length;
+  const postedCnt = allPosts.filter((i) => i.status === 'posted').length;
+  const failedCnt = allPosts.filter((i) => i.status === 'failed' || i.status === 'skipped' || i.status === 'missed').length;
+
+  return `
+    <div class="stack">
+      <div class="card stack-sm">
+        <div class="row">
+          <div>
+            <h2 class="section-title">${esc(t('postsTitle'))}</h2>
+            <p class="muted small-text" style="margin:4px 0 0">${esc(t('postsSubtitle'))}</p>
+          </div>
+          <button type="button" id="syncAllPostsBtn" class="btn btn-primary" ${syncingAll ? 'disabled' : ''}>
+            ${syncingAll ? icons.spinner() : icons.refresh()}
+            <span>${esc(t('syncAllDriveBtn'))}</span>
+          </button>
+        </div>
+
+        <div class="row">
+          <div class="seg-group" role="tablist" aria-label="${esc(t('postsTitle'))}">
+            ${[
+              { id: '', label: `${t('postsFilterAll')} (${allPosts.length})` },
+              { id: 'pending', label: `${t('postsFilterPending')} (${pendingCnt})` },
+              { id: 'posted', label: `${t('postsFilterPosted')} (${postedCnt})` },
+              { id: 'failed', label: `${t('postsFilterFailed')} (${failedCnt})` },
+            ]
+              .map(
+                (tab) => `
+              <button
+                type="button"
+                role="tab"
+                aria-selected="${f.status === tab.id ? 'true' : 'false'}"
+                class="seg-btn ${f.status === tab.id ? 'active' : ''}"
+                data-action="set-post-status"
+                data-val="${tab.id}"
+              >
+                <span class="tabular">${esc(tab.label)}</span>
+              </button>`
+              )
+              .join('')}
+          </div>
+
+          <select id="postFilterPage" class="select" style="width:auto;min-width:190px" aria-label="${esc(t('filterPage'))}">
+            <option value="">${esc(t('allPages'))}</option>
+            ${pages.map((p) => `<option value="${p.id}" ${f.pageId === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <section class="card table-card">
+        ${
+          filtered.length === 0
+            ? `<div class="empty-state">
+                ${illustrations.noPages()}
+                <h3>${esc(t('postsEmptyTitle'))}</h3>
+                <p class="muted" style="max-width:440px;margin:0">${esc(t('postsEmptyHint'))}</p>
+              </div>`
+            : `<div class="posts-feed">
+                ${filtered
+                  .map((post) => {
+                    const st = post.status === 'pending' && Number(post.attempts) > 0 ? 'retrying' : post.status;
+                    const stLbl =
+                      st === 'retrying' ? `${t('slot_retrying')} (${post.attempts}/5)` : t(`slot_${post.status}`);
+                    const rel = formatRelativeTime(post.finished_at || post.planned_utc, lang);
+                    const time12 = formatTime12h(post.planned_local);
+                    const pageSyncBusy = busyMap.has(`sync:${post.page_id}`);
+                    return `
+                      <div class="post-feed-row">
+                        <div class="post-feed-page">
+                          ${renderAvatar(post.page_name, post.page_picture_url, 38)}
+                          <div class="min-w-0">
+                            <div class="post-feed-page-name">${esc(post.page_name)}</div>
+                            <div class="muted small-text ltr tabular">
+                              ${esc(post.local_date)} · ${esc(time12)}${rel ? ` · ${esc(rel)}` : ''}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div class="post-feed-media">
+                          ${
+                            post.file_name
+                              ? `<div class="post-feed-filename ltr">${esc(post.file_name)}${post.caption_number != null ? ` · #${post.caption_number}` : ''}</div>`
+                              : `<div class="muted small-text">${esc(t('waitingDriveShort'))}</div>`
+                          }
+                          ${
+                            post.caption_preview
+                              ? `<div class="muted small-text post-feed-caption">${esc(post.caption_preview)}${post.caption_preview.length >= 200 ? '…' : ''}</div>`
+                              : ''
+                          }
+                          ${post.error ? `<div class="field-error">${esc(post.error)}</div>` : ''}
+                        </div>
+
+                        <div class="post-feed-actions">
+                          ${renderStatusBadge(st, stLbl)}
+                          ${
+                            post.status === 'pending' && !post.file_name
+                              ? `<button type="button" class="btn btn-sm" data-action="sync-page-drive" data-id="${post.page_id}" ${pageSyncBusy ? 'disabled' : ''}>
+                                  ${pageSyncBusy ? icons.spinner() : icons.refresh()}
+                                  <span>${esc(t('syncDriveBtn'))}</span>
+                                </button>`
+                              : ''
+                          }
+                        </div>
+                      </div>`;
+                  })
+                  .join('')}
+              </div>`
+        }
+      </section>
+    </div>
+  `;
+}
+
 function renderGoogleDriveCard(driveInfo, busyMap, lang) {
   const t = (k) => translate(lang, k);
   const mode = driveInfo?.mode || 'none';
@@ -783,7 +989,7 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
     <section class="card stack-sm">
       <div class="row">
         <div class="row-start">
-          <div class="avatar-circle" style="background:linear-gradient(135deg,#0ea5e9,#10b981)">${icons.folder()}</div>
+          <div class="avatar-circle" style="width:38px;height:38px;background:linear-gradient(135deg,#0ea5e9,#10b981)">${icons.folder()}</div>
           <div>
             <h2 class="section-title">${esc(t('googleDriveTitle'))}</h2>
             <p class="muted small-text" style="margin:2px 0 0">${esc(t('googleDriveDesc'))}</p>
@@ -794,17 +1000,16 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
             ? renderStatusBadge('active', driveInfo.googleEmail || 'Connected')
             : mode === 'service_account'
               ? renderStatusBadge('info', 'Service Account')
-              : renderStatusBadge('warn', t('googleNotConnected'))
+              : ''
         }
       </div>
 
       ${
         mode === 'oauth'
           ? `
-            <div class="subcard row">
-              <div>
-                <span class="muted small-text">${esc(t('googleConnectedAs'))}:</span>
-                <strong class="ltr">${esc(driveInfo.googleEmail)}</strong>
+            <div class="row" style="padding-top:4px">
+              <div class="muted small-text">
+                ${esc(t('googleConnectedAs'))}: <strong class="ltr" style="color:var(--text)">${esc(driveInfo.googleEmail)}</strong>
               </div>
               <div class="row-start">
                 ${
@@ -820,7 +1025,7 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
             </div>`
           : mode === 'service_account'
             ? `
-              <div class="subcard stack-sm">
+              <div class="stack-sm">
                 <div class="muted small-text">${esc(t('googleSaFallbackHint'))}</div>
                 <div class="code-box ltr">${esc(driveInfo.serviceAccountEmail)}</div>
                 ${
@@ -830,22 +1035,21 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
                 }
               </div>`
             : `
-              <div class="inline-alert ${driveInfo?.googleOAuthAvailable ? 'inline-alert-warn' : 'inline-alert-danger'}">
-                ${icons.alertTriangle()}
-                <span>${esc(driveInfo?.googleOAuthAvailable ? t('googleNotConnected') : t('googleNotConfiguredMsg'))}</span>
-              </div>
-              ${
-                driveInfo?.googleOAuthAvailable
-                  ? `<div><a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
-                  : ''
-              }`
+              <div class="row">
+                <span class="muted small-text">${esc(driveInfo?.googleOAuthAvailable ? t('googleNotConnected') : t('googleNotConfiguredMsg'))}</span>
+                ${
+                  driveInfo?.googleOAuthAvailable
+                    ? `<a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>`
+                    : ''
+                }
+              </div>`
       }
     </section>
   `;
 }
 
 export function renderAccountsView(state, lang, busyMap) {
-  const t = (k, v) => translate(lang, k, v);
+  const t = (k) => translate(lang, k);
   const addingManual = busyMap.has('manual-account');
   const tokenMode = state.tokenMode === 'page' ? 'page' : 'user';
 
@@ -886,7 +1090,7 @@ export function renderAccountsView(state, lang, busyMap) {
           </button>
         </div>
 
-        <div class="subcard muted small-text">
+        <div class="muted small-text">
           ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
         </div>
 
@@ -923,13 +1127,12 @@ export function renderAccountsView(state, lang, busyMap) {
                 <div class="card stack-sm">
                   <div class="row">
                     <div class="row-start">
-                      <div class="avatar-circle" style="background:${getAvatarGradient(a.name)}">${esc(getInitials(a.name))}</div>
+                      ${renderAvatar(a.name, '', 38)}
                       <div>
-                        <div class="row-start">
-                          <strong style="font-size:16px">${esc(a.name)}</strong>
-                          <span class="badge ${isPageDirect ? 'badge-info' : 'badge-neutral'}">${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))}</span>
+                        <strong style="font-size:16px">${esc(a.name)}</strong>
+                        <div class="muted small-text ltr tabular">
+                          ${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))} · ID: ${esc(a.fb_user_id)} · ${esc(t('connectedPagesCount'))}: ${a.page_count}
                         </div>
-                        <div class="muted small-text ltr">ID: ${esc(a.fb_user_id)} · ${esc(t('connectedPagesCount'))}: ${a.page_count}</div>
                         ${
                           a.token_expires_at
                             ? `<div class="muted small-text">${esc(t('tokenExpires'))}: <span title="${esc(formatExactUtc(a.token_expires_at))}">${esc(formatRelativeTime(a.token_expires_at, lang))}</span></div>`
@@ -959,7 +1162,7 @@ export function renderAccountsView(state, lang, busyMap) {
 }
 
 export function renderLicensesView(state, lang, busyMap) {
-  const t = (k, v) => translate(lang, k, v);
+  const t = (k) => translate(lang, k);
   const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const creating = busyMap.has('create-license');
 
@@ -978,7 +1181,7 @@ export function renderLicensesView(state, lang, busyMap) {
           </div>
           <div class="field">
             <label for="licMaxPagesInput">${esc(t('licMaxPagesLabel'))}</label>
-            <input id="licMaxPagesInput" type="number" min="1" max="500" class="input ltr" value="20" />
+            <input id="licMaxPagesInput" type="number" min="1" max="500" class="input ltr tabular" value="20" />
           </div>
           <div class="field">
             <label for="licExpirySelect">${esc(t('licExpiryLabel'))}</label>
@@ -999,7 +1202,7 @@ export function renderLicensesView(state, lang, busyMap) {
 
         ${
           state.createdLicenseKey
-            ? `<div class="subcard stack-sm" style="border-color:var(--accent-1)">
+            ? `<div class="stack-sm list-item-box" style="border-color:var(--accent-1)">
                 <div class="row">
                   <strong>${esc(t('licCreatedTitle'))}</strong>
                   <button type="button" class="btn btn-sm btn-ghost" id="dismissCreatedKeyBtn" aria-label="${esc(t('closeBtn'))}">${icons.close()}</button>
@@ -1044,8 +1247,8 @@ export function renderLicensesView(state, lang, busyMap) {
                             <div class="muted small-text ltr">${esc(lic.key_prefix)}</div>
                           </td>
                           <td data-label="${esc(t('licColStatus'))}">${renderStatusBadge(lic.status, t(`status_${lic.status}`))}</td>
-                          <td data-label="${esc(t('licColUsage'))}" class="ltr"><strong>${Number(lic.page_count || 0)}</strong> / ${Number(lic.max_pages || 20)}</td>
-                          <td data-label="${esc(t('licColDrive'))}">${lic.google_email ? `<span class="badge badge-active ltr">${esc(lic.google_email)}</span>` : '<span class="muted">-</span>'}</td>
+                          <td data-label="${esc(t('licColUsage'))}" class="ltr tabular"><strong>${Number(lic.page_count || 0)}</strong> / ${Number(lic.max_pages || 20)}</td>
+                          <td data-label="${esc(t('licColDrive'))}">${lic.google_email ? `<span class="ltr small-text">${esc(lic.google_email)}</span>` : '<span class="muted">-</span>'}</td>
                           <td data-label="${esc(t('licColExpires'))}" title="${esc(lic.expires_at ? formatExactUtc(lic.expires_at) : '')}">
                             ${lic.expires_at ? esc(formatRelativeTime(lic.expires_at, lang)) : `<span class="muted">${esc(t('licNeverExpires'))}</span>`}
                           </td>
@@ -1199,6 +1402,7 @@ export function renderCommandPalette(palette, pages, globalPause, lang, isAdmin 
   const q = (palette.query || '').trim().toLowerCase();
 
   const actions = [
+    { id: 'cmd-posts', label: t('goToPostsAction'), icon: icons.posts() },
     { id: 'cmd-pause', label: globalPause ? t('resumeAllBtn') : t('pauseAllBtn'), icon: globalPause ? icons.play() : icons.pause() },
     ...(isAdmin ? [{ id: 'cmd-licenses', label: t('createLicenseAction'), icon: icons.key() }] : []),
     { id: 'cmd-add-page', label: t('addPageAction'), icon: icons.pages() },
@@ -1246,7 +1450,7 @@ export function renderCommandPalette(palette, pages, globalPause, lang, isAdmin 
                      (p) => `
                    <button type="button" class="palette-item" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
                      <span class="row-start">
-                       <span class="avatar-circle" style="width:26px;height:26px;font-size:11px;background:${getAvatarGradient(p.name)}">${esc(getInitials(p.name))}</span>
+                       ${renderAvatar(p.name, p.picture_url, 26)}
                        <span>${esc(p.name)}</span>
                      </span>
                      ${renderStatusBadge(p.status, t(`status_${p.status}`))}
@@ -1272,19 +1476,22 @@ export function renderQuickActionsSheet(open, globalPause, lang, isAdmin = false
           <h3 style="margin:0">${esc(t('quickActionsLabel'))}</h3>
           <button class="btn btn-icon" data-action="close-quick" aria-label="${esc(t('closeBtn'))}">${icons.close()}</button>
         </div>
+        <button type="button" class="btn btn-primary" data-action="run-palette-action" data-cmd="cmd-posts">
+          ${icons.posts()}<span>${esc(t('goToPostsAction'))}</span>
+        </button>
         <button type="button" class="btn ${globalPause ? 'btn-primary' : 'btn-danger-outline'}" data-action="run-palette-action" data-cmd="cmd-pause">
           ${globalPause ? icons.play() : icons.pause()}
           <span>${esc(globalPause ? t('resumeAllBtn') : t('pauseAllBtn'))}</span>
         </button>
         ${
           isAdmin
-            ? `<button type="button" class="btn btn-primary" data-action="run-palette-action" data-cmd="cmd-licenses">
+            ? `<button type="button" class="btn" data-action="run-palette-action" data-cmd="cmd-licenses">
                 ${icons.key()}<span>${esc(t('navLicenses'))}</span>
               </button>`
             : ''
         }
-        <button type="button" class="btn" data-action="run-palette-action" data-cmd="cmd-add-page">
-          ${icons.pages()}<span>${esc(t('addPageAction'))}</span>
+        <button type="button" class="btn" data-action="run-palette-action" data-cmd="cmd-logs">
+          ${icons.logs()}<span>${esc(t('goToLogsAction'))}</span>
         </button>
         <button type="button" class="btn" data-action="run-palette-action" data-cmd="cmd-settings">
           ${icons.settings()}<span>${esc(t('navSettings'))}</span>
@@ -1339,8 +1546,9 @@ export function renderPickPagesModal(modal, lang) {
                   (p) => `
                   <label class="checkbox-row">
                     <input type="checkbox" class="pick-page-cb" value="${esc(p.fb_page_id)}" ${modal.selected.has(p.fb_page_id) ? 'checked' : ''} />
-                    <span style="flex:1"><strong>${esc(p.name)}</strong> <span class="muted ltr">(${esc(p.fb_page_id)})</span></span>
-                    ${p.alreadyAdded ? `<span class="badge badge-neutral">${esc(t('alreadyAdded'))}</span>` : ''}
+                    ${renderAvatar(p.name, p.picture_url, 30)}
+                    <span style="flex:1;min-width:0"><strong>${esc(p.name)}</strong> <span class="muted ltr small-text">· ${esc(p.fb_page_id)}</span></span>
+                    ${p.alreadyAdded ? `<span class="muted small-text">${esc(t('alreadyAdded'))}</span>` : ''}
                   </label>`
                 )
                 .join('')}

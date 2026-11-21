@@ -2,12 +2,15 @@ import {
   apiFetch,
   buildScheduleSummary,
   esc,
+  formatTime12h,
   runCountUps,
   safeStorageGet,
   safeStorageSet,
+  to24hHHMM,
 } from './js/api.js';
 import {
   renderAccountsView,
+  renderAvatar,
   renderCommandPalette,
   renderConfirmModal,
   renderHeroToday,
@@ -16,6 +19,7 @@ import {
   renderPageCard,
   renderPageDrawer,
   renderPickPagesModal,
+  renderPostsView,
   renderQuickActionsSheet,
   renderSettingsView,
   renderSkeletonGrid,
@@ -23,12 +27,12 @@ import {
   renderSummaryTiles,
 } from './js/components.js';
 import { translate } from './js/i18n.js';
-import { getAvatarGradient, getInitials, icons, illustrations } from './js/icons.js';
+import { icons, illustrations } from './js/icons.js';
 
 function resolveInitialTheme() {
   const saved = safeStorageGet('pp_theme');
   if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
-  return 'dark'; // Dark-first Aurora default
+  return 'dark';
 }
 
 function resolveInitialAccent() {
@@ -43,22 +47,24 @@ const state = {
   density: safeStorageGet('pp_density') === 'compact' ? 'compact' : 'comfortable',
   sidebarCollapsed: safeStorageGet('pp_sidebar') === '1',
   authenticated: false,
-  role: null, // 'admin' | 'license'
+  role: null,
   workspaceLabel: '',
   maxPages: null,
   checkingAuth: true,
   initialLoading: false,
-  tab: 'dashboard', // dashboard | accounts | pages | licenses | logs | settings
+  tab: 'dashboard', // dashboard | posts | accounts | pages | licenses | logs | settings
   dashboard: { globalPause: false, ownerGlobalPause: false, pages: [], accounts: [], sparklines: null, needsAttentionCount: 0 },
+  posts: [],
+  postFilters: { status: '', pageId: '' },
   accounts: [],
   licenses: [],
   createdLicenseKey: '',
   licenseKeyCopied: false,
-  tokenMode: 'user', // 'user' | 'page'
+  tokenMode: 'user',
   events: [],
   eventFilters: { pageId: '', level: '', date: '' },
   dashFilters: { search: '', accountId: '', status: '', sort: 'next' },
-  activeSlotPopover: null, // { pageId, slotId }
+  activeSlotPopover: null,
   driveInfo: null,
   driveFolders: null,
   drawer: null,
@@ -69,6 +75,7 @@ const state = {
   busy: new Set(),
   toast: '',
   loginError: '',
+  loginShowKey: false,
   manualTokenError: '',
   fbOAuthBanner: '',
   googleBanner: '',
@@ -92,6 +99,7 @@ function applyPreferences() {
 
   const titleMap = {
     dashboard: 'navDashboard',
+    posts: 'navPosts',
     accounts: 'navAccounts',
     pages: 'navPages',
     licenses: 'navLicenses',
@@ -140,6 +148,11 @@ const api = (path, options = {}) =>
     render();
   });
 
+async function loadPosts() {
+  const res = await api('/api/posts?limit=150');
+  state.posts = res.posts || [];
+}
+
 async function loadAllData() {
   const requests = [api('/api/dashboard'), api('/api/accounts'), api('/api/drive/info')];
   if (state.role === 'admin') {
@@ -155,7 +168,9 @@ async function loadAllData() {
     state.licenses = [];
     if (state.tab === 'licenses') state.tab = 'dashboard';
   }
-  if (state.tab === 'logs') {
+  if (state.tab === 'posts') {
+    await loadPosts();
+  } else if (state.tab === 'logs') {
     await loadEvents();
   }
 }
@@ -196,6 +211,11 @@ async function openDrawer(pageId, tab = 'schedule') {
     loading: true,
     page: null,
     slots: [],
+    newSlotHour: 8,
+    newSlotMinute: 0,
+    newSlotPeriod: 'PM',
+    customCap: false,
+    advOpen: false,
     blockedFiles: [],
     recentPlans: [],
     recentEvents: [],
@@ -215,9 +235,13 @@ async function openDrawer(pageId, tab = 'schedule') {
     ]);
     state.driveInfo = driveInfo;
     if (!state.drawer || state.drawer.pageId !== pageId) return;
+    const loadedSlots = [...(pageRes.page.slots || [])];
+    const hasCustomCap =
+      loadedSlots.length > 0 && Number(pageRes.page.daily_cap) > 0 && Number(pageRes.page.daily_cap) < loadedSlots.length;
     state.drawer.loading = false;
     state.drawer.page = pageRes.page;
-    state.drawer.slots = [...(pageRes.page.slots || [])];
+    state.drawer.slots = loadedSlots;
+    state.drawer.customCap = hasCustomCap;
     state.drawer.blockedFiles = pageRes.blockedFiles || [];
     state.drawer.recentPlans = pageRes.recentPlans || [];
     state.drawer.recentEvents = pageRes.recentEvents || [];
@@ -297,6 +321,11 @@ function syncDrawerFormInputs() {
     p.ramp_start = Number(document.getElementById('editRampStart')?.value ?? p.ramp_start);
     p.ramp_step_days = Number(document.getElementById('editRampStep')?.value ?? p.ramp_step_days);
   }
+  const hrEl = document.getElementById('newSlotHour');
+  const minEl = document.getElementById('newSlotMinute');
+  if (hrEl) state.drawer.newSlotHour = Number(hrEl.value);
+  if (minEl) state.drawer.newSlotMinute = Number(minEl.value);
+
   const capSel = document.getElementById('editCaptionsFolder');
   const medSel = document.getElementById('editMediaFolder');
   if (capSel) {
@@ -315,11 +344,12 @@ function updateLiveScheduleSummaryInDom() {
   const p = state.drawer.page;
   const summaryEl = document.getElementById('scheduleLiveSummary')?.querySelector('span');
   if (summaryEl) {
+    const cap = state.drawer.customCap ? p.daily_cap : Math.max(1, state.drawer.slots.length || 1);
     summaryEl.textContent = buildScheduleSummary(
       {
         slots: state.drawer.slots,
         jitter: p.jitter_minutes,
-        dailyCap: p.daily_cap,
+        dailyCap: cap,
         minGap: p.min_gap_minutes,
         rampEnabled: p.ramp_up_enabled,
         rampStart: p.ramp_start,
@@ -342,37 +372,65 @@ function isValidIanaTimezone(tz) {
 function renderLogin() {
   return `
     <main class="login-wrap">
-      <div class="card login-card stack">
-        <div class="row">
-          <div class="brand">
-            <div class="brand-mark">RM</div>
-            <div>
-              <div class="brand-title">${esc(t('appName'))}</div>
-              <div class="muted small-text">${esc(t('appSubtitle'))}</div>
-            </div>
-          </div>
-          <div class="row-start">
-            <button type="button" class="btn btn-sm btn-icon" id="themeToggleBtn" aria-label="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}">
-              ${isEffectiveDark() ? icons.sun() : icons.moon()}
-            </button>
-            <button type="button" class="btn btn-sm" id="langToggleBtn">
-              ${icons.globe()}<span>${esc(t('langToggle'))}</span>
-            </button>
+      <div class="login-backdrop" aria-hidden="true">
+        <div class="login-grid-bg"></div>
+        <div class="login-aurora-orb login-orb-1"></div>
+        <div class="login-aurora-orb login-orb-2"></div>
+        <div class="login-aurora-orb login-orb-3"></div>
+      </div>
+
+      <div class="login-top-controls">
+        <button type="button" class="btn btn-sm btn-icon glass-pill-btn" id="themeToggleBtn" aria-label="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}">
+          ${isEffectiveDark() ? icons.sun() : icons.moon()}
+        </button>
+        <button type="button" class="btn btn-sm glass-pill-btn" id="langToggleBtn">
+          ${icons.globe()}<span>${esc(t('langToggle'))}</span>
+        </button>
+      </div>
+
+      <div class="login-card stack">
+        <div class="login-brand-row">
+          <div class="brand-mark login-brand-mark">RM</div>
+          <div>
+            <div class="brand-title">${esc(t('appName'))}</div>
+            <div class="muted small-text">${esc(t('appSubtitle'))}</div>
           </div>
         </div>
+
         <div class="divider"></div>
+
         <div>
-          <h1 style="margin:0 0 4px;font-size:var(--text-xl)">${esc(t('loginTitle'))}</h1>
-          <p class="muted small-text" style="margin:0">${esc(t('loginHint'))}</p>
+          <h1 class="login-heading">${esc(t('loginTitle'))}</h1>
+          <p class="muted small-text" style="margin:4px 0 0">${esc(t('loginHint'))}</p>
         </div>
+
         ${state.loginError ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(state.loginError)}</span></div>` : ''}
+
         <form id="loginForm" class="stack" novalidate>
           <div class="field">
             <label for="loginPassword">${esc(t('passwordLabel'))}</label>
-            <input id="loginPassword" type="password" class="input ltr" placeholder="${esc(t('passwordPlaceholder'))}" required autocomplete="current-password" />
+            <div class="key-input-wrap">
+              <span class="key-input-icon">${icons.key()}</span>
+              <input
+                id="loginPassword"
+                type="${state.loginShowKey ? 'text' : 'password'}"
+                class="input ltr key-input-field"
+                placeholder="${esc(t('passwordPlaceholder'))}"
+                required
+                autocomplete="current-password"
+              />
+              <button
+                type="button"
+                id="toggleLoginKeyVis"
+                class="key-vis-btn"
+                aria-label="Toggle visibility"
+              >
+                ${state.loginShowKey ? icons.eyeOff() : icons.eye()}
+              </button>
+            </div>
           </div>
-          <button type="submit" class="btn btn-primary" ${state.busy.has('login') ? 'disabled' : ''}>
-            ${state.busy.has('login') ? icons.spinner() : ''}
+          <button type="submit" class="btn btn-primary login-submit-btn" ${state.busy.has('login') ? 'disabled' : ''}>
+            ${state.busy.has('login') ? icons.spinner() : icons.zap()}
             <span>${esc(t('loginBtn'))}</span>
           </button>
         </form>
@@ -445,11 +503,11 @@ function renderDashboard() {
                 <strong>${esc(t('needsAttentionTitle'))} (${attentionPages.length})</strong>
               </div>
               <p class="muted small-text" style="margin:0">${esc(t('needsAttentionDesc'))}</p>
-              <div class="stack-sm">
+              <div class="flat-list">
                 ${attentionPages
                   .map(
                     (p) => `
-                  <div class="attention-row">
+                  <div class="flat-row">
                     <div>
                       <strong>${esc(p.name)}</strong>
                       <div class="small-text muted">${esc(p.last_error || p.account_status)}</div>
@@ -538,12 +596,13 @@ function renderPagesTab() {
               <button class="btn btn-primary" id="emptyGoAccountsBtn">${esc(t('goToAccountsCta'))}</button>
             </div>`
           : `<div class="stack">${pages
-              .map(
-                (p) => `
+              .map((p) => {
+                const slotTimes12 = (p.slots || []).map((s) => formatTime12h(s)).join(' · ');
+                return `
               <div class="card stack-sm">
                 <div class="row">
                   <div class="row-start">
-                    <div class="avatar-circle" style="background:${getAvatarGradient(p.name)}">${esc(getInitials(p.name))}</div>
+                    ${renderAvatar(p.name, p.picture_url, 40)}
                     <div>
                       <strong style="font-size:16px">${esc(p.name)}</strong>
                       <div class="muted small-text">${esc(p.account_name)} · <span class="ltr">${esc(p.fb_page_id)}</span></div>
@@ -552,14 +611,12 @@ function renderPagesTab() {
                   ${renderStatusBadge(p.status, t(`status_${p.status}`))}
                 </div>
                 <div class="muted small-text">
-                  ${esc(t('timezoneLabel'))}: <strong class="ltr">${esc(p.timezone)}</strong> ·
-                  ${esc(t('dailyCapLabel'))}: <strong class="ltr">${p.daily_cap}</strong> ·
-                  ${esc(t('jitterLabel'))}: <strong class="ltr">±${p.jitter_minutes}m</strong>
+                  <span class="ltr">${esc(p.timezone)}</span> ·
+                  <span class="ltr tabular">±${p.jitter_minutes}m</span> ·
+                  <span>${esc(t('captionsFolderLabel').split('(')[0].trim())}: <strong>${esc(p.captions_folder_name || p.captions_folder_id || '-')}</strong></span> ·
+                  <span>${esc(t('mediaFolderLabel').split('(')[0].trim())}: <strong>${esc(p.media_folder_name || p.media_folder_id || '-')}</strong></span>
                 </div>
-                <div class="muted small-text">
-                  ${esc(t('captionsFolderLabel'))}: <strong>${esc(p.captions_folder_name || p.captions_folder_id || '-')}</strong> |
-                  ${esc(t('mediaFolderLabel'))}: <strong>${esc(p.media_folder_name || p.media_folder_id || '-')}</strong>
-                </div>
+                ${slotTimes12 ? `<div class="muted small-text ltr tabular">${esc(slotTimes12)}</div>` : ''}
                 <div class="row-start">
                   <button class="btn btn-sm btn-primary" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">${icons.sliders()}<span>${esc(t('drawerTabSchedule'))}</span></button>
                   <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="drive">${icons.folder()}<span>${esc(t('drawerTabDrive'))}</span></button>
@@ -567,8 +624,8 @@ function renderPagesTab() {
                   <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="history">${icons.clock()}<span>${esc(t('drawerTabHistory'))}</span></button>
                   <button class="btn btn-sm btn-danger-outline" data-action="confirm-delete-page" data-id="${p.id}" data-name="${esc(p.name)}">${icons.trash()}<span>${esc(t('deleteBtn'))}</span></button>
                 </div>
-              </div>`
-              )
+              </div>`;
+              })
               .join('')}</div>`
       }
     </div>
@@ -593,6 +650,7 @@ function render() {
   const isAdmin = state.role === 'admin';
   const navItems = [
     { id: 'dashboard', label: t('navDashboard'), icon: icons.dashboard() },
+    { id: 'posts', label: t('navPosts'), icon: icons.posts() },
     { id: 'accounts', label: t('navAccounts'), icon: icons.accounts() },
     { id: 'pages', label: t('navPages'), icon: icons.pages() },
     ...(isAdmin ? [{ id: 'licenses', label: t('navLicenses'), icon: icons.key() }] : []),
@@ -604,6 +662,8 @@ function render() {
     mainContent = renderSkeletonGrid(4);
   } else if (state.tab === 'dashboard') {
     mainContent = renderDashboard();
+  } else if (state.tab === 'posts') {
+    mainContent = renderPostsView(state, state.lang, state.busy);
   } else if (state.tab === 'accounts') {
     mainContent = renderAccountsView(state, state.lang, state.busy);
   } else if (state.tab === 'pages') {
@@ -710,10 +770,10 @@ function render() {
 
       <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
         <button class="bottom-nav-item ${state.tab === 'dashboard' ? 'active' : ''}" data-tab="dashboard">${icons.dashboard()}<span>${esc(t('navDashboard'))}</span></button>
-        <button class="bottom-nav-item ${state.tab === 'accounts' ? 'active' : ''}" data-tab="accounts">${icons.accounts()}<span>${esc(t('navAccounts'))}</span></button>
+        <button class="bottom-nav-item ${state.tab === 'posts' ? 'active' : ''}" data-tab="posts">${icons.posts()}<span>${esc(t('navPosts'))}</span></button>
         <button type="button" id="mobileFabBtn" class="mobile-fab" aria-label="${esc(t('quickActionsLabel'))}">${icons.zap()}</button>
+        <button class="bottom-nav-item ${state.tab === 'accounts' ? 'active' : ''}" data-tab="accounts">${icons.accounts()}<span>${esc(t('navAccounts'))}</span></button>
         <button class="bottom-nav-item ${state.tab === 'pages' ? 'active' : ''}" data-tab="pages">${icons.pages()}<span>${esc(t('navPages'))}</span></button>
-        <button class="bottom-nav-item ${state.tab === 'logs' ? 'active' : ''}" data-tab="logs">${icons.logs()}<span>${esc(t('navLogs'))}</span></button>
       </nav>
     </div>
 
@@ -734,7 +794,9 @@ function switchTab(nextTab) {
     state.tab = nextTab;
     state.quickSheetOpen = false;
     state.palette.open = false;
-    if (nextTab === 'logs') {
+    if (nextTab === 'posts') {
+      await loadPosts().catch((e) => showToast(e.message));
+    } else if (nextTab === 'logs') {
       await loadEvents().catch((e) => showToast(e.message));
     }
     render();
@@ -774,6 +836,18 @@ function bindEvents() {
     state.theme = isEffectiveDark() ? 'light' : 'dark';
     safeStorageSet('pp_theme', state.theme);
     render();
+  });
+
+  document.getElementById('toggleLoginKeyVis')?.addEventListener('click', () => {
+    const inp = document.getElementById('loginPassword');
+    const curVal = inp?.value || '';
+    state.loginShowKey = !state.loginShowKey;
+    render();
+    const nextInp = document.getElementById('loginPassword');
+    if (nextInp) {
+      nextInp.value = curVal;
+      nextInp.focus();
+    }
   });
 
   document.getElementById('sidebarCollapseBtn')?.addEventListener('click', () => {
@@ -846,6 +920,7 @@ function bindEvents() {
     state.licenses = [];
     state.createdLicenseKey = '';
     state.accounts = [];
+    state.posts = [];
     state.driveInfo = null;
     state.driveFolders = null;
     state.dashboard = { globalPause: false, ownerGlobalPause: false, pages: [], accounts: [], sparklines: null, needsAttentionCount: 0 };
@@ -870,6 +945,26 @@ function bindEvents() {
       state.busy.delete('refresh');
       render();
     }
+  });
+
+  document.getElementById('syncAllPostsBtn')?.addEventListener('click', async () => {
+    state.busy.add('sync-all-posts');
+    render();
+    try {
+      const res = await api('/api/posts/sync', { method: 'POST', body: '{}' });
+      await loadAllData();
+      showToast(t('syncDoneToast', { n: res.filledSlots || 0 }));
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      state.busy.delete('sync-all-posts');
+      render();
+    }
+  });
+
+  document.getElementById('postFilterPage')?.addEventListener('change', (e) => {
+    state.postFilters.pageId = e.target.value;
+    render();
   });
 
   document.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -1015,6 +1110,9 @@ function bindEvents() {
       } else if (action === 'close-palette-backdrop' && evt.target === el) {
         state.palette.open = false;
         render();
+      } else if (action === 'set-post-status') {
+        state.postFilters.status = el.dataset.val || '';
+        render();
       } else if (action === 'set-token-mode') {
         state.tokenMode = el.dataset.val === 'page' ? 'page' : 'user';
         state.manualTokenError = '';
@@ -1069,13 +1167,30 @@ function bindEvents() {
         const cmd = el.dataset.cmd;
         state.palette.open = false;
         state.quickSheetOpen = false;
-        if (cmd === 'cmd-pause') triggerGlobalPauseConfirm();
+        if (cmd === 'cmd-posts') switchTab('posts');
+        else if (cmd === 'cmd-pause') triggerGlobalPauseConfirm();
         else if (cmd === 'cmd-licenses') switchTab('licenses');
         else if (cmd === 'cmd-add-page') switchTab('accounts');
         else if (cmd === 'cmd-logs') switchTab('logs');
         else if (cmd === 'cmd-settings') switchTab('settings');
       } else if (action === 'open-drawer') {
         await openDrawer(id, el.dataset.drawerTab || 'schedule');
+      } else if (action === 'sync-page-drive') {
+        state.busy.add(`sync:${id}`);
+        render();
+        try {
+          const res = await api(`/api/pages/${id}/sync`, { method: 'POST', body: '{}' });
+          await loadAllData();
+          if (state.drawer?.pageId === id && state.drawer.tab === 'preview') {
+            await loadDrawerPreview();
+          }
+          showToast(t('syncDoneToast', { n: res.filledCount || 0 }));
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          state.busy.delete(`sync:${id}`);
+          render();
+        }
       } else if (action === 'switch-drawer-tab' && state.drawer) {
         syncDrawerFormInputs();
         state.drawer.tab = el.dataset.tab;
@@ -1085,6 +1200,14 @@ function bindEvents() {
         } else if (state.drawer.tab === 'preview' && !state.drawer.preview && !state.drawer.previewLoading) {
           loadDrawerPreview();
         }
+      } else if (action === 'set-slot-period' && state.drawer) {
+        syncDrawerFormInputs();
+        state.drawer.newSlotPeriod = el.dataset.val === 'AM' ? 'AM' : 'PM';
+        render();
+      } else if (action === 'set-jitter' && state.drawer) {
+        syncDrawerFormInputs();
+        state.drawer.page.jitter_minutes = Number(el.dataset.val || 0);
+        render();
       } else if (action === 'step' && state.drawer) {
         const inp = document.getElementById(el.dataset.target);
         if (inp) {
@@ -1092,6 +1215,9 @@ function bindEvents() {
           const max = Number(el.dataset.max);
           const next = Math.max(min, Math.min(max, Number(inp.value || 0) + Number(el.dataset.delta || 0)));
           inp.value = String(next);
+          if (el.dataset.target === 'editDailyCap') {
+            state.drawer.customCap = true;
+          }
           syncDrawerFormInputs();
           render();
         }
@@ -1267,7 +1393,16 @@ function bindEvents() {
     });
   });
 
-  ['editJitter', 'editDailyCap', 'editMinGap', 'editRampEnabled', 'editRampStart', 'editRampStep'].forEach((id) => {
+  document.getElementById('editDailyCap')?.addEventListener('input', () => {
+    if (state.drawer) state.drawer.customCap = true;
+    updateLiveScheduleSummaryInDom();
+  });
+
+  document.getElementById('advSchedulePanel')?.addEventListener('toggle', (e) => {
+    if (state.drawer) state.drawer.advOpen = Boolean(e.target.open);
+  });
+
+  ['editJitter', 'editMinGap', 'editRampEnabled', 'editRampStart', 'editRampStep'].forEach((id) => {
     document.getElementById(id)?.addEventListener('input', updateLiveScheduleSummaryInDom);
     document.getElementById(id)?.addEventListener('change', updateLiveScheduleSummaryInDom);
   });
@@ -1286,8 +1421,10 @@ function bindEvents() {
   document.getElementById('addSlotBtn')?.addEventListener('click', () => {
     if (!state.drawer) return;
     syncDrawerFormInputs();
-    const val = document.getElementById('newSlotInput')?.value;
-    if (!val || !/^([01]\d|2[0-3]):[0-5]\d$/.test(val) || state.drawer.slots.includes(val)) {
+    const hour12 = Number(document.getElementById('newSlotHour')?.value || state.drawer.newSlotHour || 8);
+    const minute = Number(document.getElementById('newSlotMinute')?.value ?? state.drawer.newSlotMinute ?? 0);
+    const val = to24hHHMM(hour12, minute, state.drawer.newSlotPeriod || 'PM');
+    if (!val || state.drawer.slots.includes(val)) {
       state.drawer.slotError = t('slotInvalid');
       render();
       return;
@@ -1320,6 +1457,7 @@ function bindEvents() {
           timezone: p.timezone.trim(),
           slots: state.drawer.slots,
           jitter_minutes: p.jitter_minutes,
+          auto_cap: !state.drawer.customCap,
           daily_cap: p.daily_cap,
           min_gap_minutes: p.min_gap_minutes,
           ramp_up_enabled: p.ramp_up_enabled,
@@ -1418,7 +1556,7 @@ async function init() {
   const googleConnected = url.searchParams.get('google_connected');
   const googleError = url.searchParams.get('google_error');
 
-  if (tabParam && ['dashboard', 'accounts', 'pages', 'licenses', 'logs', 'settings'].includes(tabParam)) {
+  if (tabParam && ['dashboard', 'posts', 'accounts', 'pages', 'licenses', 'logs', 'settings'].includes(tabParam)) {
     state.tab = tabParam;
   }
   if (fbError) {
