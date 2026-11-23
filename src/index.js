@@ -333,9 +333,112 @@ async function handleLogout(request, env) {
   return jsonResponse({ ok: true }, 200, { 'Set-Cookie': cookie });
 }
 
+async function handleDriveOAuthLink(request, env, auth) {
+  if (!env.SESSION_SECRET) {
+    return errorResponse('SESSION_SECRET secret is not configured', 503);
+  }
+  const nowMs = Date.now();
+  const bridgeToken = await signToken(
+    {
+      purpose: 'google_drive_bridge',
+      role: auth.role,
+      licenseId: auth.licenseId ?? null,
+      iat: nowMs,
+      exp: nowMs + 5 * 60_000,
+    },
+    env.SESSION_SECRET
+  );
+  const origin = new URL(request.url).origin;
+  return jsonResponse({
+    url: `${origin}/auth/google/start?bridge=${encodeURIComponent(bridgeToken)}`,
+  });
+}
+
+function escapeBasicHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function desktopOAuthResultPage({ ok, message, clearCookieHeader }) {
+  const title = ok ? 'Google Drive Connected' : 'Google Drive Connection Issue';
+  const badgeColor = ok ? '#10b981' : '#ef4444';
+  const badgeText = ok ? 'Connected' : 'Action Needed';
+  const bodyNote = ok
+    ? 'Your Google Drive account is now linked to RM Automation. You can close this browser tab and return to the RM Automation desktop app.'
+    : message || 'Could not complete Google Drive sign-in. Close this tab and try again from the RM Automation desktop app.';
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${escapeBasicHtml(title)} — RM Automation</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090d16;color:#f1f5f9;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;}
+    .card{max-width:440px;width:100%;background:#111827;border:1px solid #222e46;border-radius:16px;padding:28px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.45);}
+    .badge{display:inline-block;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:700;background:rgba(255,255,255,.06);color:${badgeColor};border:1px solid ${badgeColor};margin-bottom:14px;}
+    h1{margin:0 0 10px;font-size:20px;font-weight:700;}
+    p{margin:0 0 20px;color:#94a3b8;font-size:14px;line-height:1.55;}
+    button{background:#3b82f6;color:#fff;border:0;border-radius:10px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;}
+    button:hover{background:#2563eb;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">${escapeBasicHtml(badgeText)}</div>
+    <h1>${escapeBasicHtml(title)}</h1>
+    <p>${escapeBasicHtml(bodyNote)}</p>
+    <button type="button" onclick="window.close()">Close This Tab</button>
+  </div>
+</body>
+</html>`;
+
+  return withSecurityHeaders(
+    new Response(html, {
+      status: ok ? 200 : 400,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        ...(clearCookieHeader ? { 'Set-Cookie': clearCookieHeader } : {}),
+      },
+    })
+  );
+}
+
 async function handleGoogleStart(request, env) {
   const url = new URL(request.url);
-  const auth = await resolveAuthContext(request, env);
+  let auth = await resolveAuthContext(request, env);
+  let isDesktop = url.searchParams.get('desktop') === '1';
+
+  const bridgeParam = url.searchParams.get('bridge');
+  if (!auth && bridgeParam && env.SESSION_SECRET) {
+    const verifiedBridge = await verifyToken(bridgeParam, env.SESSION_SECRET);
+    if (verifiedBridge && verifiedBridge.purpose === 'google_drive_bridge') {
+      if (verifiedBridge.role === 'admin') {
+        auth = { role: 'admin', licenseId: null, label: 'Super Admin', maxPages: null, license: null };
+        isDesktop = true;
+      } else if (verifiedBridge.role === 'license' && verifiedBridge.licenseId) {
+        const lic = await env.DB.prepare(
+          `SELECT id, label, max_pages, status, expires_at FROM licenses WHERE id = ?`
+        )
+          .bind(Number(verifiedBridge.licenseId))
+          .first();
+        if (lic && lic.status === 'active' && (!lic.expires_at || Date.parse(lic.expires_at) > Date.now())) {
+          auth = {
+            role: 'license',
+            licenseId: lic.id,
+            label: lic.label || `License #${lic.id}`,
+            maxPages: Number(lic.max_pages || 20),
+            license: lic,
+          };
+          isDesktop = true;
+        }
+      }
+    }
+  }
+
   if (!auth) {
     return Response.redirect(`${url.origin}/?google_error=unauthorized`, 302);
   }
@@ -349,6 +452,7 @@ async function handleGoogleStart(request, env) {
       nonce,
       role: auth.role,
       licenseId: auth.licenseId,
+      desktop: isDesktop ? 1 : 0,
       iat: nowMs,
       exp: nowMs + 10 * 60_000,
     },
@@ -359,6 +463,9 @@ async function handleGoogleStart(request, env) {
   try {
     authUrl = buildGoogleOAuthUrl(env, url.origin, state);
   } catch (err) {
+    if (isDesktop) {
+      return desktopOAuthResultPage({ ok: false, message: err.message });
+    }
     return Response.redirect(
       `${url.origin}/?tab=accounts&google_error=${encodeURIComponent(err.message)}`,
       302
@@ -394,7 +501,7 @@ async function handleGoogleCallback(request, env) {
     secure: secureFlag,
   });
 
-  const redirectErr = (msg) =>
+  const redirectPreStateErr = (msg) =>
     withSecurityHeaders(
       new Response(null, {
         status: 302,
@@ -407,7 +514,7 @@ async function handleGoogleCallback(request, env) {
 
   const googleErr = url.searchParams.get('error_description') || url.searchParams.get('error');
   if (googleErr) {
-    return redirectErr(googleErr);
+    return redirectPreStateErr(googleErr);
   }
 
   const code = url.searchParams.get('code');
@@ -416,6 +523,22 @@ async function handleGoogleCallback(request, env) {
   const rawStateCookie = cookies[GOOGLE_STATE_COOKIE];
 
   const verifiedState = state && env.SESSION_SECRET ? await verifyToken(state, env.SESSION_SECRET) : null;
+  const isDesktop = verifiedState?.desktop === 1;
+  const redirectErr = (msg) => {
+    if (isDesktop) {
+      return desktopOAuthResultPage({ ok: false, message: msg, clearCookieHeader: clearStateCookie });
+    }
+    return withSecurityHeaders(
+      new Response(null, {
+        status: 302,
+        headers: {
+          Location: `${origin}/?tab=accounts&google_error=${encodeURIComponent(msg)}`,
+          'Set-Cookie': clearStateCookie,
+        },
+      })
+    );
+  };
+
   if (!code || !verifiedState || !rawStateCookie || verifiedState.nonce !== rawStateCookie) {
     return redirectErr('Invalid or expired Google OAuth state. Please try connecting again.');
   }
@@ -516,6 +639,10 @@ async function handleGoogleCallback(request, env) {
     }
 
     await env.DB.batch(stmts);
+
+    if (isDesktop) {
+      return desktopOAuthResultPage({ ok: true, clearCookieHeader: clearStateCookie });
+    }
 
     return withSecurityHeaders(
       new Response(null, {
@@ -1771,6 +1898,9 @@ export default {
 
         if (path === '/api/drive/info' && method === 'GET') {
           return handleDriveInfo(env, auth);
+        }
+        if (path === '/api/drive/oauth-link' && method === 'POST') {
+          return handleDriveOAuthLink(request, env, auth);
         }
         if (path === '/api/drive/folders' && method === 'GET') {
           return handleDriveFolders(env, auth);

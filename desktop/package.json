@@ -1,0 +1,60 @@
+{
+  "name": "rm-automation-desktop",
+  "version": "1.0.0",
+  "description": "RM Automation Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "build:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^35.7.5",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.rmautomation.desktop",
+    "productName": "RM Automation",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "offline.html",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "RM Automation",
+      "artifactName": "RM-Automation-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "RM-Automation-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.productivity"
+    }
+  }
+}

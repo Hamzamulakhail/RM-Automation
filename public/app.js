@@ -1633,4 +1633,62 @@ async function init() {
   render();
 }
 
+let desktopOAuthPending = false;
+let desktopOAuthPollTimer = null;
+let desktopOAuthStartedConnectedAt = '';
+
+async function refreshDriveStateAfterDesktopOAuth() {
+  if (!desktopOAuthPending || !state.authenticated) return;
+  try {
+    await loadAllData();
+    const newConnectedAt = state.driveInfo?.connectedAt || '';
+    if (state.driveInfo?.mode === 'oauth' && newConnectedAt && newConnectedAt !== desktopOAuthStartedConnectedAt) {
+      desktopOAuthPending = false;
+      if (desktopOAuthPollTimer) {
+        clearInterval(desktopOAuthPollTimer);
+        desktopOAuthPollTimer = null;
+      }
+      state.googleBanner = t('googleConnectedSuccess');
+      showToast(t('googleConnectedSuccess'));
+    }
+    render();
+  } catch {
+    // Ignore transient focus refresh failures
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  const link = e.target.closest?.('a[data-google-oauth="1"]');
+  if (!link || !window.RMDesktop?.isDesktop) return;
+  e.preventDefault();
+  try {
+    const res = await api('/api/drive/oauth-link', { method: 'POST' });
+    if (res?.url) {
+      desktopOAuthStartedConnectedAt = state.driveInfo?.connectedAt || '';
+      await window.RMDesktop.openExternal(res.url);
+      desktopOAuthPending = true;
+      showToast(t('googleExternalBrowserNote'));
+      if (desktopOAuthPollTimer) clearInterval(desktopOAuthPollTimer);
+      let ticks = 0;
+      desktopOAuthPollTimer = setInterval(() => {
+        ticks++;
+        if (ticks > 40 || !desktopOAuthPending) {
+          clearInterval(desktopOAuthPollTimer);
+          desktopOAuthPollTimer = null;
+          return;
+        }
+        refreshDriveStateAfterDesktopOAuth();
+      }, 3000);
+    }
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+window.addEventListener('focus', () => {
+  if (desktopOAuthPending) {
+    refreshDriveStateAfterDesktopOAuth();
+  }
+});
+
 init();

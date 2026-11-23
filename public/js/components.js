@@ -676,7 +676,7 @@ export function renderPageDrawer(drawer, driveInfo, driveFolders, lang, busyMap)
                   ${icons.alertTriangle()}
                   <div class="row" style="flex:1">
                     <span>${esc(driveInfo?.error || t('googleNotConnected'))}</span>
-                    ${driveInfo?.googleOAuthAvailable ? `<a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>` : ''}
+                    ${driveInfo?.googleOAuthAvailable ? `<a href="/auth/google/start" data-google-oauth="1" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>` : ''}
                   </div>
                 </div>`
               : ''
@@ -1037,7 +1037,7 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
           ? `<div class="conn-card-foot row-start">
                ${
                  driveInfo.googleOAuthAvailable
-                   ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>`
+                   ? `<a href="/auth/google/start" data-google-oauth="1" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>`
                    : ''
                }
                <button type="button" class="btn btn-sm btn-danger-outline" data-action="confirm-disconnect-google" ${disconnecting ? 'disabled' : ''}>
@@ -1050,14 +1050,14 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
                  <div class="code-box ltr">${esc(driveInfo.serviceAccountEmail)}</div>
                  ${
                    driveInfo.googleOAuthAvailable
-                     ? `<div><a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
+                     ? `<div><a href="/auth/google/start" data-google-oauth="1" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
                      : ''
                  }
                </div>`
             : `<div class="conn-card-foot">
                  ${
                    driveInfo?.googleOAuthAvailable
-                     ? `<a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>`
+                     ? `<a href="/auth/google/start" data-google-oauth="1" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>`
                      : `<span class="muted small-text">${esc(t('googleNotConfiguredMsg'))}</span>`
                  }
                </div>`
