@@ -101,7 +101,7 @@ function renderSparklineSvg(values, strokeColor) {
   `;
 }
 
-export function renderHeroToday(pages, globalPause, lang) {
+export function renderHeroToday(pages, globalPause, lang, busyMap = null) {
   const t = (k, v) => translate(lang, k, v);
   let posted = 0;
   let planned = 0;
@@ -116,9 +116,10 @@ export function renderHeroToday(pages, globalPause, lang) {
   }
 
   const pct = planned > 0 ? Math.min(100, Math.round((posted / planned) * 100)) : 0;
-  const r = 32;
+  const r = 30;
   const circ = 2 * Math.PI * r;
   const offset = circ - (pct / 100) * circ;
+  const syncingAll = busyMap ? busyMap.has('sync-all-posts') : false;
 
   const healthBadge = globalPause
     ? renderStatusBadge('failed', t('heroSystemPaused'))
@@ -130,15 +131,15 @@ export function renderHeroToday(pages, globalPause, lang) {
     <section class="hero-today" aria-label="${esc(t('heroTodayTitle'))}">
       <div class="hero-ring-wrap">
         <div class="ring-center">
-          <svg class="progress-ring-svg" viewBox="0 0 78 78" aria-hidden="true">
+          <svg class="progress-ring-svg" viewBox="0 0 74 74" aria-hidden="true">
             <defs>
               <linearGradient id="auroraRingGrad" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0%" stop-color="var(--accent-1)"/>
                 <stop offset="100%" stop-color="var(--accent-2)"/>
               </linearGradient>
             </defs>
-            <circle class="ring-track" cx="39" cy="39" r="${r}"/>
-            <circle class="ring-fill" cx="39" cy="39" r="${r}" stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}"/>
+            <circle class="ring-track" cx="37" cy="37" r="${r}"/>
+            <circle class="ring-fill" cx="37" cy="37" r="${r}" stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}"/>
           </svg>
           <span class="ring-center-label ltr tabular">${pct}%</span>
         </div>
@@ -153,6 +154,14 @@ export function renderHeroToday(pages, globalPause, lang) {
       </div>
       <div class="row-start">
         ${healthBadge}
+        ${
+          pages.length > 0
+            ? `<button type="button" class="btn btn-sm" data-action="sync-all-drive" ${syncingAll ? 'disabled' : ''}>
+                ${syncingAll ? icons.spinner() : icons.refresh()}
+                <span>${esc(t('syncAllDriveBtn'))}</span>
+              </button>`
+            : ''
+        }
       </div>
     </section>
   `;
@@ -182,7 +191,6 @@ export function renderSummaryTiles(pages, sparklines, lang) {
       label: t('statPostsToday'),
       value: postedToday,
       tone: 'success',
-      icon: icons.checkCircle(),
       series: sp.posted,
       stroke: 'var(--emerald)',
     },
@@ -190,7 +198,6 @@ export function renderSummaryTiles(pages, sparklines, lang) {
       label: t('statPending'),
       value: pendingToday,
       tone: 'primary',
-      icon: icons.clock(),
       series: sp.planned,
       stroke: 'var(--accent-2)',
     },
@@ -198,7 +205,6 @@ export function renderSummaryTiles(pages, sparklines, lang) {
       label: t('statFailed'),
       value: failedToday,
       tone: failedToday > 0 ? 'danger' : 'neutral',
-      icon: icons.xCircle(),
       series: sp.failed,
       stroke: failedToday > 0 ? 'var(--rose)' : 'var(--text-dim)',
     },
@@ -206,22 +212,18 @@ export function renderSummaryTiles(pages, sparklines, lang) {
       label: t('statAttention'),
       value: attentionCount,
       tone: attentionCount > 0 ? 'danger' : 'neutral',
-      icon: icons.alertTriangle(),
       series: null,
       stroke: 'var(--rose)',
     },
   ];
 
   return `
-    <section class="stats-grid" aria-label="KPI Summary">
+    <section class="stats-strip" aria-label="KPI Summary">
       ${tiles
         .map(
           (tile) => `
-        <div class="stat-tile stat-${tile.tone}">
-          <div class="stat-head">
-            <span class="stat-label">${esc(tile.label)}</span>
-            <span class="stat-icon">${tile.icon}</span>
-          </div>
+        <div class="stat-cell stat-${tile.tone}">
+          <span class="stat-label">${esc(tile.label)}</span>
           <div class="stat-bottom">
             <div class="stat-value ltr tabular" data-countup="${tile.value}">${tile.value}</div>
             ${tile.series ? renderSparklineSvg(tile.series, tile.stroke) : ''}
@@ -233,167 +235,204 @@ export function renderSummaryTiles(pages, sparklines, lang) {
   `;
 }
 
-export function renderPageCard(p, lang, busyMap, activePopover, idx = 0) {
+export function renderPaginationBar(total, pageNum, pageSize, scope, lang) {
+  if (total <= pageSize) return '';
   const t = (k, v) => translate(lang, k, v);
-  const isPaused = p.status === 'paused';
-  const hasFolders = Boolean(p.captions_folder_id && p.media_folder_id);
-  const nextUtc = p.next_planned?.planned_utc;
-  const nextRel = nextUtc ? formatRelativeTime(nextUtc, lang) : '';
-  const postBusy = busyMap.has(`post:${p.id}`);
-  const pauseBusy = busyMap.has(`pause:${p.id}`);
-  const syncBusy = busyMap.has(`sync:${p.id}`);
-
-  const todaySlots = p.today_slots || [];
-  const postedCnt = todaySlots.filter((s) => s.status === 'posted').length;
-  const healthPct = todaySlots.length > 0 ? postedCnt / todaySlots.length : p.status === 'active' ? 1 : 0;
-  const avR = 20;
-  const avCirc = 2 * Math.PI * avR;
-  const avOffset = avCirc * (1 - healthPct);
-  const ringStroke = p.status === 'needs_attention' ? 'var(--rose)' : p.status === 'paused' ? 'var(--amber)' : 'var(--emerald)';
-
-  const nowMinutes = minutesFromHHMM(p.local_time);
-  const nowPct = nowMinutes !== null ? Math.min(99, Math.max(1, (nowMinutes / 1440) * 100)) : null;
-
-  const selectedSlot =
-    activePopover && activePopover.pageId === p.id
-      ? todaySlots.find((s) => String(s.id) === String(activePopover.slotId))
-      : null;
-
-  const nextQueuedFile = todaySlots.find((s) => s.status === 'pending' && s.file_name)?.file_name || '';
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const cur = Math.min(Math.max(1, pageNum), totalPages);
+  const from = (cur - 1) * pageSize + 1;
+  const to = Math.min(total, cur * pageSize);
 
   return `
-    <article class="card page-card" data-page-id="${p.id}" style="--stagger:${Math.min(idx, 10)}">
-      <div class="card-header">
-        <div class="avatar-wrap" aria-hidden="true">
-          <svg class="avatar-ring" viewBox="0 0 44 44">
-            <circle class="avatar-ring-track" cx="22" cy="22" r="${avR}"/>
-            <circle class="avatar-ring-fill" cx="22" cy="22" r="${avR}" style="stroke:${ringStroke}" stroke-dasharray="${avCirc.toFixed(1)}" stroke-dashoffset="${avOffset.toFixed(1)}"/>
-          </svg>
-          ${renderAvatar(p.name, p.picture_url, 36)}
-        </div>
-        <div class="card-title-wrap">
-          <h3 class="card-title">${esc(p.name)}</h3>
-          <div class="card-meta">
-            <span>${esc(p.account_name)}</span>
-            <span aria-hidden="true">·</span>
-            <span class="ltr">${esc(p.timezone)}</span>
-          </div>
-        </div>
-        ${renderStatusBadge(p.status, t(`status_${p.status}`))}
-      </div>
-
-      <div class="page-time-row">
-        <div class="meta-pair">
-          <span class="muted">${esc(t('localTimeNow'))}</span>
-          <strong class="ltr tabular">${esc(formatTime12h(p.local_time))}</strong>
-        </div>
-        <div class="meta-pair">
-          <span class="muted">${esc(t('nextPlanned'))}</span>
-          ${
-            p.next_planned
-              ? `<strong class="rel-time ltr tabular" title="${esc(formatExactUtc(nextUtc))}">${esc(formatTime12h(p.next_planned.planned_local))} · ${esc(nextRel)}</strong>`
-              : `<span class="muted">${esc(t('noNextPlanned'))}</span>`
-          }
-        </div>
-      </div>
-
-      ${
-        nextQueuedFile
-          ? `<div class="queued-file-line">
-              <span class="muted">${esc(t('queuedFileLabel'))}:</span>
-              <span class="ltr queued-file-name">${esc(nextQueuedFile)}</span>
-            </div>`
-          : ''
-      }
-
-      ${!hasFolders ? `<div class="inline-alert inline-alert-warn">${icons.alertTriangle()}<span>${esc(t('folderNotSet'))}</span></div>` : ''}
-      ${p.last_error ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span><strong>${esc(t('lastError'))}:</strong> ${esc(p.last_error)}</span></div>` : ''}
-
-      <div class="timeline-24-wrap">
-        <div class="timeline-24-head">
-          <span>${esc(t('todaySlots'))}</span>
-          <span class="ltr tabular">12 AM — 12 PM — 12 AM</span>
-        </div>
-        ${
-          todaySlots.length === 0
-            ? `<div class="muted small-text">${esc(t('noSlotsToday'))}</div>`
-            : `<div class="timeline-24-bar">
-                <div class="timeline-24-axis">
-                  ${
-                    nowPct !== null
-                      ? `<span class="timeline-now-line" style="inset-inline-start:${nowPct.toFixed(1)}%" title="${esc(t('nowMarker'))}: ${esc(formatTime12h(p.local_time))}"></span>`
-                      : ''
-                  }
-                  ${todaySlots
-                    .map((s) => {
-                      const mins = minutesFromHHMM(s.planned_local) ?? 0;
-                      const pct = Math.min(98, Math.max(2, (mins / 1440) * 100));
-                      const stCls = s.status === 'pending' && Number(s.attempts) > 0 ? 'retrying' : s.status;
-                      const stLabel =
-                        stCls === 'retrying' ? `${t('slot_retrying')} (${s.attempts}/5)` : t(`slot_${s.status}`);
-                      const t12 = formatTime12h(s.planned_local);
-                      return `
-                        <button
-                          type="button"
-                          class="timeline-dot-btn dot-${esc(stCls)}"
-                          style="inset-inline-start:${pct.toFixed(1)}%"
-                          data-action="inspect-slot"
-                          data-page-id="${p.id}"
-                          data-slot-id="${s.id}"
-                          aria-label="${esc(t12)} · ${esc(stLabel)}"
-                          title="${esc(t12)} · ${esc(stLabel)}${s.file_name ? ` · ${s.file_name}` : ''}"
-                        ></button>`;
-                    })
-                    .join('')}
-                </div>
-              </div>`
-        }
-        ${
-          selectedSlot
-            ? `<div class="slot-popover" role="region" aria-label="Slot details">
-                <div class="row">
-                  <strong class="ltr tabular">${esc(formatTime12h(selectedSlot.planned_local))}</strong>
-                  ${renderStatusBadge(
-                    selectedSlot.status === 'pending' && Number(selectedSlot.attempts) > 0 ? 'retrying' : selectedSlot.status,
-                    t(`slot_${selectedSlot.status}`)
-                  )}
-                </div>
-                <div class="ltr">${esc(selectedSlot.file_name || t('slotNoFileYet'))}</div>
-                ${
-                  selectedSlot.caption_preview
-                    ? `<div class="muted">${esc(selectedSlot.caption_preview)}${selectedSlot.caption_preview.length >= 140 ? '…' : ''}</div>`
-                    : ''
-                }
-                ${selectedSlot.error ? `<div class="field-error">${esc(selectedSlot.error)}</div>` : ''}
-              </div>`
-            : ''
-        }
-      </div>
-
-      <div class="card-actions">
-        <button class="btn btn-sm" data-action="toggle-pause" data-id="${p.id}" data-paused="${isPaused ? '1' : '0'}" ${pauseBusy ? 'disabled' : ''}>
-          ${pauseBusy ? icons.spinner() : isPaused ? icons.play() : icons.pause()}
-          <span>${esc(isPaused ? t('resumePage') : t('pausePage'))}</span>
+    <div class="pagination-bar">
+      <span class="muted small-text tabular">${esc(t('showingRange', { from, to, total }))}</span>
+      <div class="row-start">
+        <button type="button" class="btn btn-sm" data-action="paginate" data-scope="${esc(scope)}" data-page="${cur - 1}" ${cur <= 1 ? 'disabled' : ''}>
+          ${esc(t('prevPageBtn'))}
         </button>
-        ${
-          hasFolders
-            ? `<button class="btn btn-sm" data-action="sync-page-drive" data-id="${p.id}" ${syncBusy ? 'disabled' : ''}>
-                ${syncBusy ? icons.spinner() : icons.refresh()}
-                <span>${esc(t('syncDriveBtn'))}</span>
-              </button>`
-            : ''
-        }
-        <button class="btn btn-sm btn-primary" data-action="confirm-post-now" data-id="${p.id}" data-name="${esc(p.name)}" ${postBusy ? 'disabled' : ''}>
-          ${postBusy ? icons.spinner() : icons.send()}
-          <span>${esc(t('postNow'))}</span>
-        </button>
-        <button class="btn btn-sm btn-ghost" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
-          ${icons.sliders()}
-          <span>${esc(t('detailsBtn'))}</span>
-          ${icons.chevronEnd()}
+        <span class="small-text ltr tabular muted">${cur} / ${totalPages}</span>
+        <button type="button" class="btn btn-sm" data-action="paginate" data-scope="${esc(scope)}" data-page="${cur + 1}" ${cur >= totalPages ? 'disabled' : ''}>
+          ${esc(t('nextPageBtn'))}
         </button>
       </div>
-    </article>
+    </div>
+  `;
+}
+
+export function renderDashboardPagesTable(pagesSlice, totalFiltered, pageNum, pageSize, lang, busyMap) {
+  const t = (k, v) => translate(lang, k, v);
+
+  return `
+    <section class="card table-card">
+      <div class="sticky-table-wrap">
+        <table class="responsive-table pages-data-table">
+          <thead>
+            <tr>
+              <th>${esc(t('colPage'))}</th>
+              <th>${esc(t('colTodayProgress'))}</th>
+              <th>${esc(t('colNextPost'))}</th>
+              <th>${esc(t('colStatus'))}</th>
+              <th>${esc(t('colActions'))}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pagesSlice
+              .map((p) => {
+                const isPaused = p.status === 'paused';
+                const hasFolders = Boolean(p.captions_folder_id && p.media_folder_id);
+                const todaySlots = p.today_slots || [];
+                const postedCnt = todaySlots.filter((s) => s.status === 'posted').length;
+                const totalCnt = todaySlots.length;
+                const pct = totalCnt > 0 ? Math.min(100, Math.round((postedCnt / totalCnt) * 100)) : 0;
+                const nextUtc = p.next_planned?.planned_utc;
+                const nextRel = nextUtc ? formatRelativeTime(nextUtc, lang) : '';
+                const nextQueuedFile = todaySlots.find((s) => s.status === 'pending' && s.file_name)?.file_name || '';
+                const postBusy = busyMap.has(`post:${p.id}`);
+                const pauseBusy = busyMap.has(`pause:${p.id}`);
+
+                return `
+                  <tr class="page-row" data-page-id="${p.id}">
+                    <td data-label="${esc(t('colPage'))}">
+                      <div class="page-cell-main">
+                        ${renderAvatar(p.name, p.picture_url, 36)}
+                        <div class="min-w-0">
+                          <div class="page-row-name">${esc(p.name)}</div>
+                          <div class="muted small-text page-row-sub">
+                            <span>${esc(p.account_name)}</span>
+                            <span aria-hidden="true">·</span>
+                            <span class="ltr">${esc(p.timezone)}</span>
+                            <span aria-hidden="true">·</span>
+                            <span class="ltr tabular">${esc(formatTime12h(p.local_time))}</span>
+                          </div>
+                          ${
+                            p.last_error
+                              ? `<div class="field-error small-text" style="margin-top:2px">${esc(p.last_error)}</div>`
+                              : !hasFolders
+                                ? `<div class="muted small-text" style="color:var(--amber);margin-top:2px">${esc(t('folderNotSet'))}</div>`
+                                : ''
+                          }
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="${esc(t('colTodayProgress'))}">
+                      <div class="progress-mini-wrap">
+                        <div class="row" style="gap:8px">
+                          <span class="small-text ltr tabular"><strong>${postedCnt}</strong> / ${totalCnt}</span>
+                          <span class="small-text ltr tabular muted">${pct}%</span>
+                        </div>
+                        <div class="progress-mini-bar" aria-hidden="true">
+                          <span class="progress-mini-fill" style="width:${pct}%"></span>
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="${esc(t('colNextPost'))}">
+                      ${
+                        p.next_planned
+                          ? `<div class="min-w-0">
+                               <div class="ltr tabular small-text" title="${esc(formatExactUtc(nextUtc))}">
+                                 <strong>${esc(formatTime12h(p.next_planned.planned_local))}</strong>
+                                 <span class="muted">· ${esc(nextRel)}</span>
+                               </div>
+                               ${
+                                 nextQueuedFile
+                                   ? `<div class="queued-file-inline ltr muted small-text">${esc(nextQueuedFile)}</div>`
+                                   : ''
+                               }
+                             </div>`
+                          : `<span class="muted small-text">${esc(t('noNextPlanned'))}</span>`
+                      }
+                    </td>
+                    <td data-label="${esc(t('colStatus'))}">
+                      ${renderStatusBadge(p.status, t(`status_${p.status}`))}
+                    </td>
+                    <td data-label="${esc(t('colActions'))}">
+                      <div class="row-start row-actions-compact">
+                        <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
+                          ${icons.sliders()}
+                          <span>${esc(t('detailsBtn'))}</span>
+                        </button>
+                        <button type="button" class="btn btn-sm btn-icon" data-action="toggle-pause" data-id="${p.id}" data-paused="${isPaused ? '1' : '0'}" title="${esc(isPaused ? t('resumePage') : t('pausePage'))}" aria-label="${esc(isPaused ? t('resumePage') : t('pausePage'))}" ${pauseBusy ? 'disabled' : ''}>
+                          ${pauseBusy ? icons.spinner() : isPaused ? icons.play() : icons.pause()}
+                        </button>
+                        <button type="button" class="btn btn-sm btn-icon btn-primary" data-action="confirm-post-now" data-id="${p.id}" data-name="${esc(p.name)}" title="${esc(t('postNow'))}" aria-label="${esc(t('postNow'))}" ${postBusy ? 'disabled' : ''}>
+                          ${postBusy ? icons.spinner() : icons.send()}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>`;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+      ${renderPaginationBar(totalFiltered, pageNum, pageSize, 'dash', lang)}
+    </section>
+  `;
+}
+
+export function renderPagesDirectory(pagesSlice, totalFiltered, pageNum, pageSize, lang) {
+  const t = (k) => translate(lang, k);
+  return `
+    <section class="card table-card">
+      <div class="sticky-table-wrap">
+        <table class="responsive-table pages-data-table">
+          <thead>
+            <tr>
+              <th>${esc(t('colPage'))}</th>
+              <th>${esc(t('colTimes'))}</th>
+              <th>${esc(t('colFolders'))}</th>
+              <th>${esc(t('colStatus'))}</th>
+              <th>${esc(t('colActions'))}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pagesSlice
+              .map((p) => {
+                const slotTimes12 = (p.slots || []).map((s) => formatTime12h(s)).join(' · ');
+                const capName = p.captions_folder_name || p.captions_folder_id || '—';
+                const medName = p.media_folder_name || p.media_folder_id || '—';
+                return `
+                  <tr class="page-row">
+                    <td data-label="${esc(t('colPage'))}">
+                      <div class="page-cell-main">
+                        ${renderAvatar(p.name, p.picture_url, 36)}
+                        <div class="min-w-0">
+                          <div class="page-row-name">${esc(p.name)}</div>
+                          <div class="muted small-text">${esc(p.account_name)} · <span class="ltr">${esc(p.timezone)}</span></div>
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="${esc(t('colTimes'))}">
+                      <div class="small-text ltr tabular">${slotTimes12 ? esc(slotTimes12) : '<span class="muted">—</span>'}</div>
+                      <div class="muted small-text ltr tabular">±${Number(p.jitter_minutes || 0)}m</div>
+                    </td>
+                    <td data-label="${esc(t('colFolders'))}">
+                      <div class="small-text">${esc(capName)} / ${esc(medName)}</div>
+                    </td>
+                    <td data-label="${esc(t('colStatus'))}">
+                      ${renderStatusBadge(p.status, t(`status_${p.status}`))}
+                    </td>
+                    <td data-label="${esc(t('colActions'))}">
+                      <div class="row-start row-actions-compact">
+                        <button type="button" class="btn btn-sm btn-primary" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
+                          ${icons.sliders()}<span>${esc(t('drawerTabSchedule'))}</span>
+                        </button>
+                        <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="drive">
+                          ${icons.folder()}<span>${esc(t('drawerTabDrive'))}</span>
+                        </button>
+                        <button type="button" class="btn btn-sm btn-icon btn-danger-outline" data-action="confirm-delete-page" data-id="${p.id}" data-name="${esc(p.name)}" aria-label="${esc(t('deleteBtn'))}">
+                          ${icons.trash()}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>`;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+      ${renderPaginationBar(totalFiltered, pageNum, pageSize, 'pages', lang)}
+    </section>
   `;
 }
 
@@ -867,6 +906,10 @@ export function renderPostsView(state, lang, busyMap) {
     return true;
   });
 
+  const pageSize = 25;
+  const curPage = Math.max(1, Math.min(Number(state.postsPageNum || 1), Math.max(1, Math.ceil(filtered.length / pageSize))));
+  const slice = filtered.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   const pendingCnt = allPosts.filter((i) => i.status === 'pending' || i.status === 'posting').length;
   const postedCnt = allPosts.filter((i) => i.status === 'posted').length;
   const failedCnt = allPosts.filter((i) => i.status === 'failed' || i.status === 'skipped' || i.status === 'missed').length;
@@ -925,18 +968,17 @@ export function renderPostsView(state, lang, busyMap) {
                 <p class="muted" style="max-width:440px;margin:0">${esc(t('postsEmptyHint'))}</p>
               </div>`
             : `<div class="posts-feed">
-                ${filtered
+                ${slice
                   .map((post) => {
                     const st = post.status === 'pending' && Number(post.attempts) > 0 ? 'retrying' : post.status;
                     const stLbl =
                       st === 'retrying' ? `${t('slot_retrying')} (${post.attempts}/5)` : t(`slot_${post.status}`);
                     const rel = formatRelativeTime(post.finished_at || post.planned_utc, lang);
                     const time12 = formatTime12h(post.planned_local);
-                    const pageSyncBusy = busyMap.has(`sync:${post.page_id}`);
                     return `
                       <div class="post-feed-row">
                         <div class="post-feed-page">
-                          ${renderAvatar(post.page_name, post.page_picture_url, 38)}
+                          ${renderAvatar(post.page_name, post.page_picture_url, 36)}
                           <div class="min-w-0">
                             <div class="post-feed-page-name">${esc(post.page_name)}</div>
                             <div class="muted small-text ltr tabular">
@@ -949,7 +991,7 @@ export function renderPostsView(state, lang, busyMap) {
                           ${
                             post.file_name
                               ? `<div class="post-feed-filename ltr">${esc(post.file_name)}${post.caption_number != null ? ` · #${post.caption_number}` : ''}</div>`
-                              : `<div class="muted small-text">${esc(t('waitingDriveShort'))}</div>`
+                              : `<div class="muted small-text">${esc(t('slotNoFileYet'))}</div>`
                           }
                           ${
                             post.caption_preview
@@ -961,19 +1003,12 @@ export function renderPostsView(state, lang, busyMap) {
 
                         <div class="post-feed-actions">
                           ${renderStatusBadge(st, stLbl)}
-                          ${
-                            post.status === 'pending' && !post.file_name
-                              ? `<button type="button" class="btn btn-sm" data-action="sync-page-drive" data-id="${post.page_id}" ${pageSyncBusy ? 'disabled' : ''}>
-                                  ${pageSyncBusy ? icons.spinner() : icons.refresh()}
-                                  <span>${esc(t('syncDriveBtn'))}</span>
-                                </button>`
-                              : ''
-                          }
                         </div>
                       </div>`;
                   })
                   .join('')}
-              </div>`
+              </div>
+              ${renderPaginationBar(filtered.length, curPage, pageSize, 'posts', lang)}`
         }
       </section>
     </div>
@@ -1059,102 +1094,99 @@ export function renderAccountsView(state, lang, busyMap) {
       ${state.googleError ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(state.googleError)}</span></div>` : ''}
       ${state.fbOAuthBanner ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(state.fbOAuthBanner)}</span></div>` : ''}
 
-      ${renderGoogleDriveCard(state.driveInfo, busyMap, lang)}
+      <div class="connections-grid">
+        ${renderGoogleDriveCard(state.driveInfo, busyMap, lang)}
 
-      <section class="card stack">
-        <div>
-          <h2 class="section-title">${esc(t('fbConnectTitle'))}</h2>
-          <p class="muted small-text" style="margin:4px 0 0">${esc(t('fbConnectDesc'))}</p>
-        </div>
+        <section class="card stack">
+          <div>
+            <h2 class="section-title">${esc(t('fbConnectTitle'))}</h2>
+            <p class="muted small-text" style="margin:4px 0 0">${esc(t('fbConnectDesc'))}</p>
+          </div>
 
-        <div class="seg-group" role="tablist" aria-label="${esc(t('fbConnectTitle'))}">
-          <button
-            type="button"
-            role="tab"
-            aria-selected="${tokenMode === 'user' ? 'true' : 'false'}"
-            class="seg-btn ${tokenMode === 'user' ? 'active' : ''}"
-            data-action="set-token-mode"
-            data-val="user"
-          >
-            ${icons.accounts()}<span>${esc(t('fbModeUser'))}</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected="${tokenMode === 'page' ? 'true' : 'false'}"
-            class="seg-btn ${tokenMode === 'page' ? 'active' : ''}"
-            data-action="set-token-mode"
-            data-val="page"
-          >
-            ${icons.pages()}<span>${esc(t('fbModePage'))}</span>
-          </button>
-        </div>
-
-        <div class="muted small-text">
-          ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
-        </div>
-
-        <form id="manualTokenForm" class="stack-sm">
-          <div class="row-start">
-            <input
-              id="manualTokenInput"
-              type="password"
-              class="input ltr"
-              style="flex:1;min-width:220px"
-              placeholder="${esc(tokenMode === 'page' ? t('fbPageTokenPlaceholder') : t('fbUserTokenPlaceholder'))}"
-            />
-            <button type="submit" class="btn btn-primary" ${addingManual ? 'disabled' : ''}>
-              ${addingManual ? icons.spinner() : icons.plus()}
-              <span>${esc(tokenMode === 'page' ? t('connectPageDirectBtn') : t('addManualTokenBtn'))}</span>
+          <div class="seg-group" role="tablist" aria-label="${esc(t('fbConnectTitle'))}">
+            <button
+              type="button"
+              role="tab"
+              aria-selected="${tokenMode === 'user' ? 'true' : 'false'}"
+              class="seg-btn ${tokenMode === 'user' ? 'active' : ''}"
+              data-action="set-token-mode"
+              data-val="user"
+            >
+              ${icons.accounts()}<span>${esc(t('fbModeUser'))}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected="${tokenMode === 'page' ? 'true' : 'false'}"
+              class="seg-btn ${tokenMode === 'page' ? 'active' : ''}"
+              data-action="set-token-mode"
+              data-val="page"
+            >
+              ${icons.pages()}<span>${esc(t('fbModePage'))}</span>
             </button>
           </div>
-          ${state.manualTokenError ? `<div class="field-error">${esc(state.manualTokenError)}</div>` : ''}
-        </form>
-      </section>
 
-      <section class="stack">
+          <div class="muted small-text">
+            ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
+          </div>
+
+          <form id="manualTokenForm" class="stack-sm">
+            <div class="row-start">
+              <input
+                id="manualTokenInput"
+                type="password"
+                class="input ltr"
+                style="flex:1;min-width:200px"
+                placeholder="${esc(tokenMode === 'page' ? t('fbPageTokenPlaceholder') : t('fbUserTokenPlaceholder'))}"
+              />
+              <button type="submit" class="btn btn-primary" ${addingManual ? 'disabled' : ''}>
+                ${addingManual ? icons.spinner() : icons.plus()}
+                <span>${esc(tokenMode === 'page' ? t('connectPageDirectBtn') : t('addManualTokenBtn'))}</span>
+              </button>
+            </div>
+            ${state.manualTokenError ? `<div class="field-error">${esc(state.manualTokenError)}</div>` : ''}
+          </form>
+        </section>
+      </div>
+
+      <section class="card table-card">
         ${
           state.accounts.length === 0
-            ? `<div class="card empty-state">
+            ? `<div class="empty-state">
                 ${illustrations.noPages()}
                 <h3>${esc(t('noAccountsYet'))}</h3>
                 <p class="muted">${esc(t('noAccountsHint'))}</p>
               </div>`
-            : state.accounts
-                .map((a) => {
-                  const isPageDirect = a.token_kind === 'page_direct';
-                  return `
-                <div class="card stack-sm">
-                  <div class="row">
-                    <div class="row-start">
-                      ${renderAvatar(a.name, '', 38)}
-                      <div>
-                        <strong style="font-size:16px">${esc(a.name)}</strong>
+            : `<div class="flat-list" style="border:none;border-radius:0">
+                ${state.accounts
+                  .map((a) => {
+                    const isPageDirect = a.token_kind === 'page_direct';
+                    return `
+                  <div class="flat-row">
+                    <div class="row-start min-w-0">
+                      ${renderAvatar(a.name, '', 36)}
+                      <div class="min-w-0">
+                        <strong style="font-size:15px">${esc(a.name)}</strong>
                         <div class="muted small-text ltr tabular">
-                          ${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))} · ID: ${esc(a.fb_user_id)} · ${esc(t('connectedPagesCount'))}: ${a.page_count}
+                          ${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))} · ${esc(t('connectedPagesCount'))}: ${a.page_count}${a.token_expires_at ? ` · ${esc(t('tokenExpires'))}: ${esc(formatRelativeTime(a.token_expires_at, lang))}` : ''}
                         </div>
-                        ${
-                          a.token_expires_at
-                            ? `<div class="muted small-text">${esc(t('tokenExpires'))}: <span title="${esc(formatExactUtc(a.token_expires_at))}">${esc(formatRelativeTime(a.token_expires_at, lang))}</span></div>`
-                            : ''
-                        }
+                        ${a.last_error ? `<div class="field-error small-text">${esc(a.last_error)}</div>` : ''}
                       </div>
                     </div>
-                    ${renderStatusBadge(a.status, t(`status_${a.status}`))}
-                  </div>
-                  ${a.last_error ? `<div class="inline-alert inline-alert-danger">${icons.xCircle()}<span>${esc(a.last_error)}</span></div>` : ''}
-                  <div class="row-start">
-                    ${
-                      isPageDirect
-                        ? `<button class="btn btn-sm btn-primary" data-action="prepare-update-token" data-mode="page">${icons.key()}<span>${esc(t('updateTokenBtn'))}</span></button>`
-                        : `<button class="btn btn-sm btn-primary" data-action="select-pages" data-id="${a.id}">${icons.pages()}<span>${esc(t('selectPagesBtn'))}</span></button>`
-                    }
-                    <button class="btn btn-sm" data-action="check-account" data-id="${a.id}">${icons.shield()}<span>${esc(t('checkTokenBtn'))}</span></button>
-                    <button class="btn btn-sm btn-danger-outline" data-action="confirm-delete-account" data-id="${a.id}" data-name="${esc(a.name)}">${icons.trash()}<span>${esc(t('deleteBtn'))}</span></button>
-                  </div>
-                </div>`;
-                })
-                .join('')
+                    <div class="row-start">
+                      ${renderStatusBadge(a.status, t(`status_${a.status}`))}
+                      ${
+                        isPageDirect
+                          ? `<button class="btn btn-sm btn-primary" data-action="prepare-update-token" data-mode="page">${icons.key()}<span>${esc(t('updateTokenBtn'))}</span></button>`
+                          : `<button class="btn btn-sm btn-primary" data-action="select-pages" data-id="${a.id}">${icons.pages()}<span>${esc(t('selectPagesBtn'))}</span></button>`
+                      }
+                      <button class="btn btn-sm" data-action="check-account" data-id="${a.id}">${icons.shield()}<span>${esc(t('checkTokenBtn'))}</span></button>
+                      <button class="btn btn-sm btn-icon btn-danger-outline" data-action="confirm-delete-account" data-id="${a.id}" data-name="${esc(a.name)}" aria-label="${esc(t('deleteBtn'))}">${icons.trash()}</button>
+                    </div>
+                  </div>`;
+                  })
+                  .join('')}
+              </div>`
         }
       </section>
     </div>

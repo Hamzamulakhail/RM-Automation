@@ -13,11 +13,12 @@ import {
   renderAvatar,
   renderCommandPalette,
   renderConfirmModal,
+  renderDashboardPagesTable,
   renderHeroToday,
   renderLicensesView,
   renderLogsView,
-  renderPageCard,
   renderPageDrawer,
+  renderPagesDirectory,
   renderPickPagesModal,
   renderPostsView,
   renderQuickActionsSheet,
@@ -64,6 +65,10 @@ const state = {
   events: [],
   eventFilters: { pageId: '', level: '', date: '' },
   dashFilters: { search: '', accountId: '', status: '', sort: 'next' },
+  dashPageNum: 1,
+  pagesPageNum: 1,
+  postsPageNum: 1,
+  pagesSearch: '',
   activeSlotPopover: null,
   driveInfo: null,
   driveFolders: null,
@@ -478,6 +483,10 @@ function renderDashboard() {
     (p) => p.status === 'needs_attention' || p.account_status === 'needs_attention'
   );
   const filteredPages = getFilteredPages();
+  const pageSize = 15;
+  const totalPages = Math.max(1, Math.ceil(filteredPages.length / pageSize));
+  const curPage = Math.max(1, Math.min(state.dashPageNum || 1, totalPages));
+  const pageSlice = filteredPages.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   return `
     <div class="stack">
@@ -492,23 +501,26 @@ function renderDashboard() {
           : ''
       }
 
-      ${renderHeroToday(pages, globalPause, state.lang)}
+      ${renderHeroToday(pages, globalPause, state.lang, state.busy)}
       ${renderSummaryTiles(pages, sparklines, state.lang)}
 
       ${
         attentionPages.length > 0
           ? `<section class="attention-panel stack-sm" aria-label="${esc(t('needsAttentionTitle'))}">
-              <div class="row-start">
-                ${icons.alertTriangle()}
-                <strong>${esc(t('needsAttentionTitle'))} (${attentionPages.length})</strong>
+              <div class="row">
+                <div class="row-start">
+                  ${icons.alertTriangle()}
+                  <strong>${esc(t('needsAttentionTitle'))} (${attentionPages.length})</strong>
+                </div>
+                <span class="muted small-text">${esc(t('needsAttentionDesc'))}</span>
               </div>
-              <p class="muted small-text" style="margin:0">${esc(t('needsAttentionDesc'))}</p>
               <div class="flat-list">
                 ${attentionPages
+                  .slice(0, 5)
                   .map(
                     (p) => `
                   <div class="flat-row">
-                    <div>
+                    <div class="min-w-0">
                       <strong>${esc(p.name)}</strong>
                       <div class="small-text muted">${esc(p.last_error || p.account_status)}</div>
                     </div>
@@ -571,7 +583,7 @@ function renderDashboard() {
                 <p class="muted">${esc(t('noFilterMatches'))}</p>
                 <button class="btn btn-sm" id="clearDashFiltersBtn">${esc(t('clearFiltersBtn'))}</button>
               </div>`
-            : `<div class="page-grid">${filteredPages.map((p, idx) => renderPageCard(p, state.lang, state.busy, state.activeSlotPopover, idx)).join('')}</div>`
+            : renderDashboardPagesTable(pageSlice, filteredPages.length, curPage, pageSize, state.lang, state.busy)
         }
       `
       }
@@ -581,10 +593,29 @@ function renderDashboard() {
 
 function renderPagesTab() {
   const { pages } = state.dashboard;
+  const q = (state.pagesSearch || '').trim().toLowerCase();
+  const filtered = q
+    ? pages.filter((p) => p.name.toLowerCase().includes(q) || String(p.fb_page_id).includes(q))
+    : pages;
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const curPage = Math.max(1, Math.min(state.pagesPageNum || 1, totalPages));
+  const slice = filtered.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   return `
     <div class="stack">
       <div class="card row">
-        <h2 class="section-title">${esc(t('navPages'))} (${pages.length})</h2>
+        <div class="row-start" style="flex:1;min-width:220px">
+          <h2 class="section-title">${esc(t('navPages'))} <span class="muted tabular">(${pages.length})</span></h2>
+          ${
+            pages.length > 0
+              ? `<div class="search-wrap" style="max-width:280px;flex:1">
+                  ${icons.search()}
+                  <input id="pagesSearchInput" class="input" type="search" placeholder="${esc(t('searchPagesPlaceholder'))}" value="${esc(state.pagesSearch)}" />
+                </div>`
+              : ''
+          }
+        </div>
         <button class="btn btn-sm btn-primary" id="pagesGoAccountsBtn">${icons.plus()}<span>${esc(t('addPageAction'))}</span></button>
       </div>
       ${
@@ -595,38 +626,12 @@ function renderPagesTab() {
               <p class="muted">${esc(t('noPagesHint'))}</p>
               <button class="btn btn-primary" id="emptyGoAccountsBtn">${esc(t('goToAccountsCta'))}</button>
             </div>`
-          : `<div class="stack">${pages
-              .map((p) => {
-                const slotTimes12 = (p.slots || []).map((s) => formatTime12h(s)).join(' · ');
-                return `
-              <div class="card stack-sm">
-                <div class="row">
-                  <div class="row-start">
-                    ${renderAvatar(p.name, p.picture_url, 40)}
-                    <div>
-                      <strong style="font-size:16px">${esc(p.name)}</strong>
-                      <div class="muted small-text">${esc(p.account_name)} · <span class="ltr">${esc(p.fb_page_id)}</span></div>
-                    </div>
-                  </div>
-                  ${renderStatusBadge(p.status, t(`status_${p.status}`))}
-                </div>
-                <div class="muted small-text">
-                  <span class="ltr">${esc(p.timezone)}</span> ·
-                  <span class="ltr tabular">±${p.jitter_minutes}m</span> ·
-                  <span>${esc(t('captionsFolderLabel').split('(')[0].trim())}: <strong>${esc(p.captions_folder_name || p.captions_folder_id || '-')}</strong></span> ·
-                  <span>${esc(t('mediaFolderLabel').split('(')[0].trim())}: <strong>${esc(p.media_folder_name || p.media_folder_id || '-')}</strong></span>
-                </div>
-                ${slotTimes12 ? `<div class="muted small-text ltr tabular">${esc(slotTimes12)}</div>` : ''}
-                <div class="row-start">
-                  <button class="btn btn-sm btn-primary" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">${icons.sliders()}<span>${esc(t('drawerTabSchedule'))}</span></button>
-                  <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="drive">${icons.folder()}<span>${esc(t('drawerTabDrive'))}</span></button>
-                  <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="preview">${icons.eye()}<span>${esc(t('drawerTabPreview'))}</span></button>
-                  <button class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="history">${icons.clock()}<span>${esc(t('drawerTabHistory'))}</span></button>
-                  <button class="btn btn-sm btn-danger-outline" data-action="confirm-delete-page" data-id="${p.id}" data-name="${esc(p.name)}">${icons.trash()}<span>${esc(t('deleteBtn'))}</span></button>
-                </div>
-              </div>`;
-              })
-              .join('')}</div>`
+          : filtered.length === 0
+            ? `<div class="card empty-state">
+                ${illustrations.noSearch()}
+                <p class="muted">${esc(t('noFilterMatches'))}</p>
+              </div>`
+            : renderPagesDirectory(slice, filtered.length, curPage, pageSize, state.lang)
       }
     </div>
   `;
@@ -947,7 +952,7 @@ function bindEvents() {
     }
   });
 
-  document.getElementById('syncAllPostsBtn')?.addEventListener('click', async () => {
+  async function runSyncAllDrive() {
     state.busy.add('sync-all-posts');
     render();
     try {
@@ -960,10 +965,13 @@ function bindEvents() {
       state.busy.delete('sync-all-posts');
       render();
     }
-  });
+  }
+
+  document.getElementById('syncAllPostsBtn')?.addEventListener('click', runSyncAllDrive);
 
   document.getElementById('postFilterPage')?.addEventListener('change', (e) => {
     state.postFilters.pageId = e.target.value;
+    state.postsPageNum = 1;
     render();
   });
 
@@ -976,10 +984,11 @@ function bindEvents() {
   document.getElementById('pagesGoAccountsBtn')?.addEventListener('click', () => switchTab('accounts'));
   document.getElementById('globalPauseBtn')?.addEventListener('click', triggerGlobalPauseConfirm);
 
-  // Dashboard filters
+  // Dashboard & Pages filters
   document.getElementById('dashSearchInput')?.addEventListener('input', (e) => {
     const pos = e.target.selectionStart;
     state.dashFilters.search = e.target.value;
+    state.dashPageNum = 1;
     render();
     const el = document.getElementById('dashSearchInput');
     if (el) {
@@ -987,16 +996,30 @@ function bindEvents() {
       el.setSelectionRange(pos, pos);
     }
   });
+  document.getElementById('pagesSearchInput')?.addEventListener('input', (e) => {
+    const pos = e.target.selectionStart;
+    state.pagesSearch = e.target.value;
+    state.pagesPageNum = 1;
+    render();
+    const el = document.getElementById('pagesSearchInput');
+    if (el) {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    }
+  });
   document.getElementById('dashFilterAccount')?.addEventListener('change', (e) => {
     state.dashFilters.accountId = e.target.value;
+    state.dashPageNum = 1;
     render();
   });
   document.getElementById('dashSortSelect')?.addEventListener('change', (e) => {
     state.dashFilters.sort = e.target.value;
+    state.dashPageNum = 1;
     render();
   });
   document.getElementById('clearDashFiltersBtn')?.addEventListener('click', () => {
     state.dashFilters = { search: '', accountId: '', status: '', sort: 'next' };
+    state.dashPageNum = 1;
     render();
   });
 
@@ -1112,7 +1135,18 @@ function bindEvents() {
         render();
       } else if (action === 'set-post-status') {
         state.postFilters.status = el.dataset.val || '';
+        state.postsPageNum = 1;
         render();
+      } else if (action === 'sync-all-drive') {
+        await runSyncAllDrive();
+      } else if (action === 'paginate') {
+        const nextP = Math.max(1, Number(el.dataset.page || 1));
+        const scope = el.dataset.scope;
+        if (scope === 'dash') state.dashPageNum = nextP;
+        else if (scope === 'pages') state.pagesPageNum = nextP;
+        else if (scope === 'posts') state.postsPageNum = nextP;
+        render();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       } else if (action === 'set-token-mode') {
         state.tokenMode = el.dataset.val === 'page' ? 'page' : 'user';
         state.manualTokenError = '';
@@ -1144,6 +1178,7 @@ function bindEvents() {
         render();
       } else if (action === 'set-status-chip') {
         state.dashFilters.status = el.dataset.val || '';
+        state.dashPageNum = 1;
         render();
       } else if (action === 'set-theme') {
         state.theme = el.dataset.val;
