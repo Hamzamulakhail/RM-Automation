@@ -1119,9 +1119,21 @@ export async function runCron(env) {
     await syncDriveQueueForPage(env, c.page, { force: false }).catch(() => null);
   }
 
-  // Occasionally prune event logs older than 30 days (~every hour at minute 0)
-  if (new Date(nowMs).getUTCMinutes() === 0) {
-    const cutoff30d = new Date(nowMs - 30 * 86400_000).toISOString();
-    await env.DB.prepare(`DELETE FROM events WHERE created_at < ?`).bind(cutoff30d).run();
+  // Prune logs (events) and historical posts (plan) older than 7 days (~every 15 min)
+  if (new Date(nowMs).getUTCMinutes() % 15 === 0) {
+    await pruneExpiredHistory(env.DB, nowMs);
   }
+}
+
+export async function pruneExpiredHistory(db, nowMs = Date.now()) {
+  const cutoff7dIso = new Date(nowMs - 7 * 86400_000).toISOString();
+  await db.batch([
+    db.prepare(`DELETE FROM events WHERE created_at < ?`).bind(cutoff7dIso),
+    db.prepare(
+      `DELETE FROM plan
+       WHERE planned_utc < ?
+         AND status != 'posting'
+         AND cleanup_pending = 0`
+    ).bind(cutoff7dIso),
+  ]);
 }

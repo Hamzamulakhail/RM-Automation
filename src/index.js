@@ -21,6 +21,7 @@ import {
 import {
   postNowForPage,
   previewNextPostForPage,
+  pruneExpiredHistory,
   regenerateTodayPlanForPage,
   runCron,
   syncDriveQueueForPage,
@@ -1409,9 +1410,13 @@ async function handlePostsFeed(request, env, auth) {
   const status = url.searchParams.get('status');
   const limit = Math.min(200, Math.max(20, Number(url.searchParams.get('limit') || 120)));
 
+  const nowMs = Date.now();
+  await pruneExpiredHistory(env.DB, nowMs).catch(() => null);
+  const cutoff7dIso = new Date(nowMs - 7 * 86400_000).toISOString();
+
   const scope = licenseScopeSql('p.license_id', auth.licenseId);
-  const where = [scope.sql];
-  const params = [...scope.params];
+  const where = [scope.sql, 'pl.planned_utc >= ?'];
+  const params = [...scope.params, cutoff7dIso];
 
   if (pageId && /^\d+$/.test(pageId)) {
     where.push('pl.page_id = ?');
@@ -1503,9 +1508,13 @@ async function handleEvents(request, env, auth) {
   const date = url.searchParams.get('date');
   const limit = Math.min(200, Math.max(10, Number(url.searchParams.get('limit') || 100)));
 
+  const nowMs = Date.now();
+  await pruneExpiredHistory(env.DB, nowMs).catch(() => null);
+  const cutoff7dIso = new Date(nowMs - 7 * 86400_000).toISOString();
+
   const scope = licenseScopeSql('e.license_id', auth.licenseId);
-  const where = [scope.sql];
-  const params = [...scope.params];
+  const where = [scope.sql, 'e.created_at >= ?'];
+  const params = [...scope.params, cutoff7dIso];
 
   if (pageId && /^\d+$/.test(pageId)) {
     where.push('e.page_id = ?');

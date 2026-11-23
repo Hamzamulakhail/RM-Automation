@@ -260,110 +260,108 @@ export function renderPaginationBar(total, pageNum, pageSize, scope, lang) {
 }
 
 export function renderDashboardPagesTable(pagesSlice, totalFiltered, pageNum, pageSize, lang, busyMap) {
-  const t = (k, v) => translate(lang, k, v);
+  const t = (k) => translate(lang, k);
 
   return `
     <section class="card table-card">
-      <div class="sticky-table-wrap">
-        <table class="responsive-table pages-data-table">
-          <thead>
-            <tr>
-              <th>${esc(t('colPage'))}</th>
-              <th>${esc(t('colTodayProgress'))}</th>
-              <th>${esc(t('colNextPost'))}</th>
-              <th>${esc(t('colStatus'))}</th>
-              <th>${esc(t('colActions'))}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pagesSlice
-              .map((p) => {
-                const isPaused = p.status === 'paused';
-                const hasFolders = Boolean(p.captions_folder_id && p.media_folder_id);
-                const todaySlots = p.today_slots || [];
-                const postedCnt = todaySlots.filter((s) => s.status === 'posted').length;
-                const totalCnt = todaySlots.length;
-                const pct = totalCnt > 0 ? Math.min(100, Math.round((postedCnt / totalCnt) * 100)) : 0;
-                const nextUtc = p.next_planned?.planned_utc;
-                const nextRel = nextUtc ? formatRelativeTime(nextUtc, lang) : '';
-                const nextQueuedFile = todaySlots.find((s) => s.status === 'pending' && s.file_name)?.file_name || '';
-                const postBusy = busyMap.has(`post:${p.id}`);
-                const pauseBusy = busyMap.has(`pause:${p.id}`);
+      <div class="data-list">
+        <div class="dash-data-head" aria-hidden="true">
+          <span>${esc(t('colPage'))}</span>
+          <span>${esc(t('colTodayProgress'))}</span>
+          <span>${esc(t('colNextPost'))}</span>
+          <span>${esc(t('colStatus'))}</span>
+          <span>${esc(t('colActions'))}</span>
+        </div>
+        ${pagesSlice
+          .map((p) => {
+            const isPaused = p.status === 'paused';
+            const hasFolders = Boolean(p.captions_folder_id && p.media_folder_id);
+            const todaySlots = p.today_slots || [];
+            const postedCnt = todaySlots.filter((s) => s.status === 'posted').length;
+            const totalCnt = todaySlots.length;
+            const pct = totalCnt > 0 ? Math.min(100, Math.round((postedCnt / totalCnt) * 100)) : 0;
+            const nextUtc = p.next_planned?.planned_utc;
+            const nextRel = nextUtc ? formatRelativeTime(nextUtc, lang) : '';
+            const nextQueuedFile = todaySlots.find((s) => s.status === 'pending' && s.file_name)?.file_name || '';
+            const postBusy = busyMap.has(`post:${p.id}`);
+            const pauseBusy = busyMap.has(`pause:${p.id}`);
 
-                return `
-                  <tr class="page-row" data-page-id="${p.id}">
-                    <td data-label="${esc(t('colPage'))}">
-                      <div class="page-cell-main">
-                        ${renderAvatar(p.name, p.picture_url, 36)}
-                        <div class="min-w-0">
-                          <div class="page-row-name">${esc(p.name)}</div>
-                          <div class="muted small-text page-row-sub">
-                            <span>${esc(p.account_name)}</span>
-                            <span aria-hidden="true">·</span>
-                            <span class="ltr">${esc(p.timezone)}</span>
-                            <span aria-hidden="true">·</span>
-                            <span class="ltr tabular">${esc(formatTime12h(p.local_time))}</span>
-                          </div>
-                          ${
-                            p.last_error
-                              ? `<div class="field-error small-text" style="margin-top:2px">${esc(p.last_error)}</div>`
-                              : !hasFolders
-                                ? `<div class="muted small-text" style="color:var(--amber);margin-top:2px">${esc(t('folderNotSet'))}</div>`
-                                : ''
-                          }
-                        </div>
+            return `
+              <div class="dash-data-row" data-page-id="${p.id}">
+                <div class="dash-col-page">
+                  <div class="page-cell-main">
+                    ${renderAvatar(p.name, p.picture_url, 36)}
+                    <div class="min-w-0">
+                      <div class="page-row-name">${esc(p.name)}</div>
+                      <div class="muted small-text page-row-sub">
+                        <span>${esc(p.account_name)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span class="ltr">${esc(p.timezone)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span class="ltr tabular">${esc(formatTime12h(p.local_time))}</span>
                       </div>
-                    </td>
-                    <td data-label="${esc(t('colTodayProgress'))}">
-                      <div class="progress-mini-wrap">
-                        <div class="row" style="gap:8px">
-                          <span class="small-text ltr tabular"><strong>${postedCnt}</strong> / ${totalCnt}</span>
-                          <span class="small-text ltr tabular muted">${pct}%</span>
-                        </div>
-                        <div class="progress-mini-bar" aria-hidden="true">
-                          <span class="progress-mini-fill" style="width:${pct}%"></span>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="${esc(t('colNextPost'))}">
                       ${
-                        p.next_planned
-                          ? `<div class="min-w-0">
-                               <div class="ltr tabular small-text" title="${esc(formatExactUtc(nextUtc))}">
-                                 <strong>${esc(formatTime12h(p.next_planned.planned_local))}</strong>
-                                 <span class="muted">· ${esc(nextRel)}</span>
-                               </div>
-                               ${
-                                 nextQueuedFile
-                                   ? `<div class="queued-file-inline ltr muted small-text">${esc(nextQueuedFile)}</div>`
-                                   : ''
-                               }
-                             </div>`
-                          : `<span class="muted small-text">${esc(t('noNextPlanned'))}</span>`
+                        p.last_error
+                          ? `<div class="field-error small-text" style="margin-top:2px">${esc(p.last_error)}</div>`
+                          : !hasFolders
+                            ? `<div class="muted small-text" style="color:var(--amber);margin-top:2px">${esc(t('folderNotSet'))}</div>`
+                            : ''
                       }
-                    </td>
-                    <td data-label="${esc(t('colStatus'))}">
-                      ${renderStatusBadge(p.status, t(`status_${p.status}`))}
-                    </td>
-                    <td data-label="${esc(t('colActions'))}">
-                      <div class="row-start row-actions-compact">
-                        <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
-                          ${icons.sliders()}
-                          <span>${esc(t('detailsBtn'))}</span>
-                        </button>
-                        <button type="button" class="btn btn-sm btn-icon" data-action="toggle-pause" data-id="${p.id}" data-paused="${isPaused ? '1' : '0'}" title="${esc(isPaused ? t('resumePage') : t('pausePage'))}" aria-label="${esc(isPaused ? t('resumePage') : t('pausePage'))}" ${pauseBusy ? 'disabled' : ''}>
-                          ${pauseBusy ? icons.spinner() : isPaused ? icons.play() : icons.pause()}
-                        </button>
-                        <button type="button" class="btn btn-sm btn-icon btn-primary" data-action="confirm-post-now" data-id="${p.id}" data-name="${esc(p.name)}" title="${esc(t('postNow'))}" aria-label="${esc(t('postNow'))}" ${postBusy ? 'disabled' : ''}>
-                          ${postBusy ? icons.spinner() : icons.send()}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>`;
-              })
-              .join('')}
-          </tbody>
-        </table>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="dash-col-progress">
+                  <div class="progress-mini-wrap">
+                    <div class="row" style="gap:8px">
+                      <span class="small-text ltr tabular"><strong>${postedCnt}</strong> / ${totalCnt}</span>
+                      <span class="small-text ltr tabular muted">${pct}%</span>
+                    </div>
+                    <div class="progress-mini-bar" aria-hidden="true">
+                      <span class="progress-mini-fill" style="width:${pct}%"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="dash-col-next min-w-0">
+                  ${
+                    p.next_planned
+                      ? `<div class="min-w-0">
+                           <div class="ltr tabular small-text">
+                             <strong>${esc(formatTime12h(p.next_planned.planned_local))}</strong>
+                             <span class="muted"> · ${esc(nextRel)}</span>
+                           </div>
+                           ${
+                             nextQueuedFile
+                               ? `<div class="queued-file-inline ltr muted small-text">${esc(nextQueuedFile)}</div>`
+                               : ''
+                           }
+                         </div>`
+                      : `<span class="muted small-text">${esc(t('noNextPlanned'))}</span>`
+                  }
+                </div>
+
+                <div class="dash-col-status">
+                  ${renderStatusBadge(p.status, t(`status_${p.status}`))}
+                </div>
+
+                <div class="dash-col-actions">
+                  <div class="row-start row-actions-compact">
+                    <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
+                      ${icons.sliders()}
+                      <span>${esc(t('detailsBtn'))}</span>
+                    </button>
+                    <button type="button" class="btn btn-sm btn-icon" data-action="toggle-pause" data-id="${p.id}" data-paused="${isPaused ? '1' : '0'}" title="${esc(isPaused ? t('resumePage') : t('pausePage'))}" aria-label="${esc(isPaused ? t('resumePage') : t('pausePage'))}" ${pauseBusy ? 'disabled' : ''}>
+                      ${pauseBusy ? icons.spinner() : isPaused ? icons.play() : icons.pause()}
+                    </button>
+                    <button type="button" class="btn btn-sm btn-icon btn-primary" data-action="confirm-post-now" data-id="${p.id}" data-name="${esc(p.name)}" title="${esc(t('postNow'))}" aria-label="${esc(t('postNow'))}" ${postBusy ? 'disabled' : ''}>
+                      ${postBusy ? icons.spinner() : icons.send()}
+                    </button>
+                  </div>
+                </div>
+              </div>`;
+          })
+          .join('')}
       </div>
       ${renderPaginationBar(totalFiltered, pageNum, pageSize, 'dash', lang)}
     </section>
@@ -374,62 +372,57 @@ export function renderPagesDirectory(pagesSlice, totalFiltered, pageNum, pageSiz
   const t = (k) => translate(lang, k);
   return `
     <section class="card table-card">
-      <div class="sticky-table-wrap">
-        <table class="responsive-table pages-data-table">
-          <thead>
-            <tr>
-              <th>${esc(t('colPage'))}</th>
-              <th>${esc(t('colTimes'))}</th>
-              <th>${esc(t('colFolders'))}</th>
-              <th>${esc(t('colStatus'))}</th>
-              <th>${esc(t('colActions'))}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pagesSlice
-              .map((p) => {
-                const slotTimes12 = (p.slots || []).map((s) => formatTime12h(s)).join(' · ');
-                const capName = p.captions_folder_name || p.captions_folder_id || '—';
-                const medName = p.media_folder_name || p.media_folder_id || '—';
-                return `
-                  <tr class="page-row">
-                    <td data-label="${esc(t('colPage'))}">
-                      <div class="page-cell-main">
-                        ${renderAvatar(p.name, p.picture_url, 36)}
-                        <div class="min-w-0">
-                          <div class="page-row-name">${esc(p.name)}</div>
-                          <div class="muted small-text">${esc(p.account_name)} · <span class="ltr">${esc(p.timezone)}</span></div>
-                        </div>
+      <div class="directory-list">
+        ${pagesSlice
+          .map((p) => {
+            const slots = p.slots || [];
+            const hasFolders = Boolean(p.captions_folder_id && p.media_folder_id);
+            const folderLabel = hasFolders
+              ? `${p.captions_folder_name || p.captions_folder_id} / ${p.media_folder_name || p.media_folder_id}`
+              : t('folderNotSet');
+
+            return `
+              <div class="directory-row" data-page-id="${p.id}">
+                <div class="directory-row-top">
+                  <div class="page-cell-main min-w-0" style="flex:1">
+                    ${renderAvatar(p.name, p.picture_url, 38)}
+                    <div class="min-w-0">
+                      <div class="page-row-name">${esc(p.name)}</div>
+                      <div class="muted small-text page-row-sub">
+                        <span>${esc(p.account_name)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span class="ltr">${esc(p.timezone)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span style="${hasFolders ? '' : 'color:var(--amber)'}">${esc(folderLabel)}</span>
                       </div>
-                    </td>
-                    <td data-label="${esc(t('colTimes'))}">
-                      <div class="small-text ltr tabular">${slotTimes12 ? esc(slotTimes12) : '<span class="muted">—</span>'}</div>
-                      <div class="muted small-text ltr tabular">±${Number(p.jitter_minutes || 0)}m</div>
-                    </td>
-                    <td data-label="${esc(t('colFolders'))}">
-                      <div class="small-text">${esc(capName)} / ${esc(medName)}</div>
-                    </td>
-                    <td data-label="${esc(t('colStatus'))}">
-                      ${renderStatusBadge(p.status, t(`status_${p.status}`))}
-                    </td>
-                    <td data-label="${esc(t('colActions'))}">
-                      <div class="row-start row-actions-compact">
-                        <button type="button" class="btn btn-sm btn-primary" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
-                          ${icons.sliders()}<span>${esc(t('drawerTabSchedule'))}</span>
-                        </button>
-                        <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="drive">
-                          ${icons.folder()}<span>${esc(t('drawerTabDrive'))}</span>
-                        </button>
-                        <button type="button" class="btn btn-sm btn-icon btn-danger-outline" data-action="confirm-delete-page" data-id="${p.id}" data-name="${esc(p.name)}" aria-label="${esc(t('deleteBtn'))}">
-                          ${icons.trash()}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>`;
-              })
-              .join('')}
-          </tbody>
-        </table>
+                    </div>
+                  </div>
+
+                  <div class="directory-row-actions">
+                    ${renderStatusBadge(p.status, t(`status_${p.status}`))}
+                    <button type="button" class="btn btn-sm btn-primary" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="schedule">
+                      ${icons.sliders()}<span>${esc(t('drawerTabSchedule'))}</span>
+                    </button>
+                    <button type="button" class="btn btn-sm" data-action="open-drawer" data-id="${p.id}" data-drawer-tab="drive">
+                      ${icons.folder()}<span>${esc(t('driveFoldersShort'))}</span>
+                    </button>
+                    <button type="button" class="btn btn-sm btn-icon btn-danger-outline" data-action="confirm-delete-page" data-id="${p.id}" data-name="${esc(p.name)}" aria-label="${esc(t('deleteBtn'))}">
+                      ${icons.trash()}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="directory-times-bar">
+                  <span class="muted small-text ltr tabular">${slots.length}× · ±${Number(p.jitter_minutes || 0)}m</span>
+                  ${
+                    slots.length > 0
+                      ? slots.map((s) => `<span class="time-token ltr tabular">${esc(formatTime12h(s))}</span>`).join('')
+                      : `<span class="muted small-text">${esc(t('noSlotsShort'))}</span>`
+                  }
+                </div>
+              </div>`;
+          })
+          .join('')}
       </div>
       ${renderPaginationBar(totalFiltered, pageNum, pageSize, 'pages', lang)}
     </section>
@@ -1021,63 +1014,53 @@ function renderGoogleDriveCard(driveInfo, busyMap, lang) {
   const disconnecting = busyMap.has('disconnect-google');
 
   return `
-    <section class="card stack-sm">
-      <div class="row">
-        <div class="row-start">
-          <div class="avatar-circle" style="width:38px;height:38px;background:linear-gradient(135deg,#0ea5e9,#10b981)">${icons.folder()}</div>
-          <div>
+    <section class="card connection-card">
+      <div class="stack-sm">
+        <div class="row">
+          <div class="row-start">
+            <span class="conn-icon-inline">${icons.google()}</span>
             <h2 class="section-title">${esc(t('googleDriveTitle'))}</h2>
-            <p class="muted small-text" style="margin:2px 0 0">${esc(t('googleDriveDesc'))}</p>
           </div>
+          ${
+            mode === 'oauth'
+              ? renderStatusBadge('active', driveInfo.googleEmail || 'Connected')
+              : mode === 'service_account'
+                ? renderStatusBadge('info', 'Service Account')
+                : renderStatusBadge('warn', t('googleNotConnected'))
+          }
         </div>
-        ${
-          mode === 'oauth'
-            ? renderStatusBadge('active', driveInfo.googleEmail || 'Connected')
-            : mode === 'service_account'
-              ? renderStatusBadge('info', 'Service Account')
-              : ''
-        }
+        <p class="muted small-text" style="margin:0">${esc(t('googleDriveDesc'))}</p>
       </div>
 
       ${
         mode === 'oauth'
-          ? `
-            <div class="row" style="padding-top:4px">
-              <div class="muted small-text">
-                ${esc(t('googleConnectedAs'))}: <strong class="ltr" style="color:var(--text)">${esc(driveInfo.googleEmail)}</strong>
-              </div>
-              <div class="row-start">
-                ${
-                  driveInfo.googleOAuthAvailable
-                    ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>`
-                    : ''
-                }
-                <button type="button" class="btn btn-sm btn-danger-outline" data-action="confirm-disconnect-google" ${disconnecting ? 'disabled' : ''}>
-                  ${disconnecting ? icons.spinner() : icons.trash()}
-                  <span>${esc(t('disconnectGoogleBtn'))}</span>
-                </button>
-              </div>
-            </div>`
+          ? `<div class="conn-card-foot row-start">
+               ${
+                 driveInfo.googleOAuthAvailable
+                   ? `<a href="/auth/google/start" class="btn btn-sm">${icons.google()}<span>${esc(t('switchGoogleBtn'))}</span></a>`
+                   : ''
+               }
+               <button type="button" class="btn btn-sm btn-danger-outline" data-action="confirm-disconnect-google" ${disconnecting ? 'disabled' : ''}>
+                 ${disconnecting ? icons.spinner() : icons.trash()}
+                 <span>${esc(t('disconnectGoogleBtn'))}</span>
+               </button>
+             </div>`
           : mode === 'service_account'
-            ? `
-              <div class="stack-sm">
-                <div class="muted small-text">${esc(t('googleSaFallbackHint'))}</div>
-                <div class="code-box ltr">${esc(driveInfo.serviceAccountEmail)}</div>
-                ${
-                  driveInfo.googleOAuthAvailable
-                    ? `<div><a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
-                    : ''
-                }
-              </div>`
-            : `
-              <div class="row">
-                <span class="muted small-text">${esc(driveInfo?.googleOAuthAvailable ? t('googleNotConnected') : t('googleNotConfiguredMsg'))}</span>
-                ${
-                  driveInfo?.googleOAuthAvailable
-                    ? `<a href="/auth/google/start" class="btn btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>`
-                    : ''
-                }
-              </div>`
+            ? `<div class="conn-card-foot stack-sm">
+                 <div class="code-box ltr">${esc(driveInfo.serviceAccountEmail)}</div>
+                 ${
+                   driveInfo.googleOAuthAvailable
+                     ? `<div><a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a></div>`
+                     : ''
+                 }
+               </div>`
+            : `<div class="conn-card-foot">
+                 ${
+                   driveInfo?.googleOAuthAvailable
+                     ? `<a href="/auth/google/start" class="btn btn-sm btn-primary">${icons.google()}<span>${esc(t('signInGoogleBtn'))}</span></a>`
+                     : `<span class="muted small-text">${esc(t('googleNotConfiguredMsg'))}</span>`
+                 }
+               </div>`
       }
     </section>
   `;
@@ -1097,46 +1080,45 @@ export function renderAccountsView(state, lang, busyMap) {
       <div class="connections-grid">
         ${renderGoogleDriveCard(state.driveInfo, busyMap, lang)}
 
-        <section class="card stack">
-          <div>
+        <section class="card connection-card">
+          <div class="stack-sm">
             <h2 class="section-title">${esc(t('fbConnectTitle'))}</h2>
-            <p class="muted small-text" style="margin:4px 0 0">${esc(t('fbConnectDesc'))}</p>
+
+            <div class="seg-group seg-group-2col" role="tablist" aria-label="${esc(t('fbConnectTitle'))}">
+              <button
+                type="button"
+                role="tab"
+                aria-selected="${tokenMode === 'user' ? 'true' : 'false'}"
+                class="seg-btn ${tokenMode === 'user' ? 'active' : ''}"
+                data-action="set-token-mode"
+                data-val="user"
+              >
+                ${icons.accounts()}<span>${esc(t('fbModeUser'))}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected="${tokenMode === 'page' ? 'true' : 'false'}"
+                class="seg-btn ${tokenMode === 'page' ? 'active' : ''}"
+                data-action="set-token-mode"
+                data-val="page"
+              >
+                ${icons.pages()}<span>${esc(t('fbModePage'))}</span>
+              </button>
+            </div>
+
+            <div class="muted small-text">
+              ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
+            </div>
           </div>
 
-          <div class="seg-group" role="tablist" aria-label="${esc(t('fbConnectTitle'))}">
-            <button
-              type="button"
-              role="tab"
-              aria-selected="${tokenMode === 'user' ? 'true' : 'false'}"
-              class="seg-btn ${tokenMode === 'user' ? 'active' : ''}"
-              data-action="set-token-mode"
-              data-val="user"
-            >
-              ${icons.accounts()}<span>${esc(t('fbModeUser'))}</span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected="${tokenMode === 'page' ? 'true' : 'false'}"
-              class="seg-btn ${tokenMode === 'page' ? 'active' : ''}"
-              data-action="set-token-mode"
-              data-val="page"
-            >
-              ${icons.pages()}<span>${esc(t('fbModePage'))}</span>
-            </button>
-          </div>
-
-          <div class="muted small-text">
-            ${esc(tokenMode === 'page' ? t('fbModePageHint') : t('fbModeUserHint'))}
-          </div>
-
-          <form id="manualTokenForm" class="stack-sm">
+          <form id="manualTokenForm" class="conn-card-foot stack-sm">
             <div class="row-start">
               <input
                 id="manualTokenInput"
                 type="password"
                 class="input ltr"
-                style="flex:1;min-width:200px"
+                style="flex:1;min-width:180px"
                 placeholder="${esc(tokenMode === 'page' ? t('fbPageTokenPlaceholder') : t('fbUserTokenPlaceholder'))}"
               />
               <button type="submit" class="btn btn-primary" ${addingManual ? 'disabled' : ''}>
@@ -1150,6 +1132,9 @@ export function renderAccountsView(state, lang, busyMap) {
       </div>
 
       <section class="card table-card">
+        <div class="table-head-bar">
+          <h3 class="section-title" style="font-size:var(--text-base)">${esc(t('connectedAccountsTitle'))} <span class="muted tabular">(${state.accounts.length})</span></h3>
+        </div>
         ${
           state.accounts.length === 0
             ? `<div class="empty-state">
@@ -1166,7 +1151,7 @@ export function renderAccountsView(state, lang, busyMap) {
                     <div class="row-start min-w-0">
                       ${renderAvatar(a.name, '', 36)}
                       <div class="min-w-0">
-                        <strong style="font-size:15px">${esc(a.name)}</strong>
+                        <strong style="font-size:14px">${esc(a.name)}</strong>
                         <div class="muted small-text ltr tabular">
                           ${esc(t(isPageDirect ? 'pageDirectBadge' : 'userTokenBadge'))} · ${esc(t('connectedPagesCount'))}: ${a.page_count}${a.token_expires_at ? ` · ${esc(t('tokenExpires'))}: ${esc(formatRelativeTime(a.token_expires_at, lang))}` : ''}
                         </div>
@@ -1316,27 +1301,30 @@ export function renderLogsView(state, lang) {
 
   return `
     <div class="stack">
-      <div class="card form-grid form-grid-3" style="position:sticky;top:68px;z-index:10">
-        <div class="field">
-          <label for="logFilterPage">${esc(t('filterPage'))}</label>
-          <select id="logFilterPage" class="select">
-            <option value="">${esc(t('allPages'))}</option>
-            ${pages.map((p) => `<option value="${p.id}" ${f.pageId === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-          </select>
+      <div class="card stack-sm" style="position:sticky;top:64px;z-index:10">
+        <div class="form-grid form-grid-3">
+          <div class="field">
+            <label for="logFilterPage">${esc(t('filterPage'))}</label>
+            <select id="logFilterPage" class="select">
+              <option value="">${esc(t('allPages'))}</option>
+              ${pages.map((p) => `<option value="${p.id}" ${f.pageId === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="logFilterLevel">${esc(t('filterLevel'))}</label>
+            <select id="logFilterLevel" class="select">
+              <option value="">${esc(t('allLevels'))}</option>
+              <option value="info" ${f.level === 'info' ? 'selected' : ''}>${esc(t('level_info'))}</option>
+              <option value="warn" ${f.level === 'warn' ? 'selected' : ''}>${esc(t('level_warn'))}</option>
+              <option value="error" ${f.level === 'error' ? 'selected' : ''}>${esc(t('level_error'))}</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="logFilterDate">${esc(t('filterDate'))}</label>
+            <input id="logFilterDate" type="date" class="input ltr" value="${esc(f.date)}" />
+          </div>
         </div>
-        <div class="field">
-          <label for="logFilterLevel">${esc(t('filterLevel'))}</label>
-          <select id="logFilterLevel" class="select">
-            <option value="">${esc(t('allLevels'))}</option>
-            <option value="info" ${f.level === 'info' ? 'selected' : ''}>${esc(t('level_info'))}</option>
-            <option value="warn" ${f.level === 'warn' ? 'selected' : ''}>${esc(t('level_warn'))}</option>
-            <option value="error" ${f.level === 'error' ? 'selected' : ''}>${esc(t('level_error'))}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="logFilterDate">${esc(t('filterDate'))}</label>
-          <input id="logFilterDate" type="date" class="input ltr" value="${esc(f.date)}" />
-        </div>
+        <div class="muted small-text">${esc(t('retentionNote7d'))}</div>
       </div>
 
       <div class="card table-card">

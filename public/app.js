@@ -698,7 +698,6 @@ function render() {
             <div class="brand-mark">RM</div>
             <div class="brand-text">
               <div class="brand-title">${esc(t('appName'))}</div>
-              <span class="sidebar-badge">${esc(workspaceBadgeText)}</span>
             </div>
           </div>
           <button type="button" class="btn btn-icon btn-ghost" id="sidebarCollapseBtn" aria-label="${esc(state.sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar'))}" title="${esc(state.sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar'))}">
@@ -718,6 +717,7 @@ function render() {
         </nav>
 
         <div class="sidebar-footer">
+          <div class="sidebar-workspace-meta">${esc(workspaceBadgeText)}</div>
           <button class="nav-item ${state.tab === 'settings' ? 'active' : ''}" data-tab="settings" aria-current="${state.tab === 'settings' ? 'page' : 'false'}" title="${esc(t('navSettings'))}">
             ${icons.settings()}<span class="sidebar-label">${esc(t('navSettings'))}</span>
           </button>
@@ -743,7 +743,7 @@ function render() {
                 <span>${esc(t('cmdButtonLabel'))}</span>
                 <span class="kbd ltr">⌘K</span>
               </button>
-              <button type="button" id="mobileSearchBtn" class="btn btn-sm btn-icon mobile-search-btn" aria-label="${esc(t('cmdButtonLabel'))}">
+              <button type="button" id="mobileSearchBtn" class="btn btn-sm btn-ghost btn-icon mobile-search-btn" aria-label="${esc(t('cmdButtonLabel'))}">
                 ${icons.search()}
               </button>
               <button
@@ -754,13 +754,13 @@ function render() {
                 ${globalPaused ? icons.play() : icons.pause()}
                 <span class="hide-sm">${esc(globalPaused ? t('resumeAllBtn') : t('pauseAllBtn'))}</span>
               </button>
-              <button id="refreshBtn" class="btn btn-sm btn-icon" aria-label="${esc(t('refreshBtn'))}" title="${esc(t('refreshBtn'))}">
+              <button id="refreshBtn" class="btn btn-sm btn-ghost btn-icon" aria-label="${esc(t('refreshBtn'))}" title="${esc(t('refreshBtn'))}">
                 ${state.busy.has('refresh') ? icons.spinner() : icons.refresh()}
               </button>
-              <button id="themeToggleBtn" class="btn btn-sm btn-icon" aria-label="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}" title="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}">
+              <button id="themeToggleBtn" class="btn btn-sm btn-ghost btn-icon" aria-label="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}" title="${esc(isEffectiveDark() ? t('themeLight') : t('themeDark'))}">
                 ${isEffectiveDark() ? icons.sun() : icons.moon()}
               </button>
-              <button id="langToggleBtn" class="btn btn-sm">
+              <button id="langToggleBtn" class="btn btn-sm btn-ghost">
                 ${icons.globe()}<span class="hide-sm">${esc(t('langToggle'))}</span>
               </button>
               <button id="logoutBtn" class="btn btn-sm btn-ghost btn-icon" aria-label="${esc(t('logoutBtn'))}" title="${esc(t('logoutBtn'))}">
