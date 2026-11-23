@@ -395,7 +395,7 @@ function renderLogin() {
 
       <div class="login-card stack">
         <div class="login-brand-row">
-          <div class="brand-mark login-brand-mark">RM</div>
+          <div class="brand-mark login-brand-mark"><img src="/assets/logo.png" alt="RM Automation" class="brand-logo-img" /></div>
           <div>
             <div class="brand-title">${esc(t('appName'))}</div>
             <div class="muted small-text">${esc(t('appSubtitle'))}</div>
@@ -695,7 +695,7 @@ function render() {
       <aside class="sidebar ${state.sidebarCollapsed ? 'collapsed' : ''}" aria-label="Main navigation">
         <div class="sidebar-head">
           <div class="brand">
-            <div class="brand-mark">RM</div>
+            <div class="brand-mark"><img src="/assets/logo.png" alt="RM Automation" class="brand-logo-img" /></div>
             <div class="brand-text">
               <div class="brand-title">${esc(t('appName'))}</div>
             </div>
@@ -729,7 +729,7 @@ function render() {
           <div class="topbar-inner">
             <div class="topbar-left">
               <div class="brand topbar-brand-mobile">
-                <div class="brand-mark">RM</div>
+                <div class="brand-mark"><img src="/assets/logo.png" alt="RM Automation" class="brand-logo-img" /></div>
                 <div class="brand-title">${esc(t('appName'))}</div>
               </div>
               <div class="topbar-title-desktop">
