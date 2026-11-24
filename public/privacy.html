@@ -4,39 +4,194 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Privacy Policy — RM Automation</title>
-  <link rel="stylesheet" href="/style.css" />
+  <meta name="description" content="Privacy Policy and User Data Deletion Instructions for RM Automation." />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/logo.png" />
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #090d16;
+      --card: #111827;
+      --card-2: #182235;
+      --border: #222e46;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-soft: rgba(59, 130, 246, 0.14);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --card: #ffffff;
+        --card-2: #f1f5f9;
+        --border: #e2e8f0;
+        --text: #0f172a;
+        --muted: #475569;
+        --accent: #2563eb;
+        --accent-soft: rgba(37, 99, 235, 0.1);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.65;
+      padding: 32px 16px 64px;
+    }
+    .wrap {
+      max-width: 820px;
+      margin: 0 auto;
+    }
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .brand img {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+    }
+    .brand strong {
+      display: block;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+    .brand span {
+      display: block;
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+    .back-link:hover { border-color: var(--accent); color: var(--accent); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 26px;
+      letter-spacing: -0.025em;
+    }
+    .updated {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12.5px;
+      font-weight: 600;
+      margin-bottom: 22px;
+    }
+    h2 {
+      margin: 26px 0 10px;
+      font-size: 18px;
+      letter-spacing: -0.015em;
+    }
+    p { margin: 0 0 12px; color: var(--muted); }
+    ul { margin: 0 0 14px; padding-left: 20px; color: var(--muted); }
+    li { margin-bottom: 6px; }
+    strong.hi { color: var(--text); }
+    .callout {
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-top: 14px;
+    }
+    @media (max-width: 600px) {
+      .card { padding: 20px; }
+      h1 { font-size: 22px; }
+    }
+  </style>
 </head>
 <body>
-  <main class="legal-wrap">
-    <div class="card legal-card">
+  <main class="wrap">
+    <header class="head">
+      <a class="brand" href="/">
+        <img src="/assets/logo.png" alt="RM Automation Logo" />
+        <div>
+          <strong>RM Automation</strong>
+          <span>Privacy Policy &amp; Data Practices</span>
+        </div>
+      </a>
+      <a class="back-link" href="/">Back to Portal</a>
+    </header>
+
+    <article class="card">
       <h1>Privacy Policy</h1>
-      <p class="muted">Effective date: 2026-01-01</p>
+      <div class="updated">Effective Date: November 24, 2026</div>
+
       <p>
-        <strong>RM Automation</strong> is a multi-workspace social publishing automation platform hosted on Cloudflare Workers
-        that publishes scheduled photos, videos, and captions from a user's connected Google Drive folders to authorized Facebook Pages.
+        <strong class="hi">RM Automation</strong> provides authorized workspace owners and licensees with automated scheduling and publishing from their connected Google Drive folders to their managed Facebook Pages. This Privacy Policy explains what information is processed, how it is protected, and how you can remove your data at any time.
       </p>
-      <h2>Information We Process</h2>
+
+      <h2>1. Information We Process</h2>
       <ul>
-        <li><strong>Google Account &amp; Google Drive (OAuth 2.0):</strong> With your explicit consent via Google Sign-In (<code>https://www.googleapis.com/auth/drive</code> and <code>https://www.googleapis.com/auth/userinfo.email</code>), we store your Google account email address and an AES-256-GCM encrypted OAuth refresh token in Cloudflare D1 solely to list folders you select, read caption files (<code>captions.txt</code>) and media files, update caption files after posting, and move posted media files to your Google Drive Trash.</li>
-        <li><strong>Facebook Accounts &amp; Pages:</strong> Facebook account/Page IDs, names, and access tokens pasted directly by you inside your workspace. All tokens are stored in Cloudflare D1 using AES-256-GCM encryption and are never returned in plaintext to the browser.</li>
-        <li><strong>License &amp; Workspace Data:</strong> Workspace license metadata, Page schedules, queue status, and diagnostic event logs (automatically pruned after 30 days).</li>
+        <li><strong class="hi">Authentication &amp; Workspace Identifiers:</strong> Session cookies (<code class="hi">HttpOnly</code>) and workspace license identifiers required to keep you signed in securely.</li>
+        <li><strong class="hi">Facebook / Meta Data:</strong> Access tokens you explicitly connect, your Facebook account/Page names, Page IDs, and Page profile picture URLs used solely to display your Pages and publish scheduled posts on your behalf via Meta Graph API.</li>
+        <li><strong class="hi">Google Drive Data:</strong> Google OAuth tokens and the specific Drive folder IDs you choose inside the app so RM Automation can read scheduled media files and captions (<code class="hi">captions.txt</code>, <code class="hi">caption.txt</code>, or Google Docs) and move published items to Trash when configured.</li>
+        <li><strong class="hi">Operational Logs &amp; Queue Records:</strong> Scheduled slot timestamps, file identifiers, posting outcomes, and error diagnostics needed to run reliable automated publishing.</li>
       </ul>
-      <h2>How Data Is Used &amp; Shared</h2>
+
+      <h2>2. How We Use Information</h2>
+      <p>Your connected tokens and content are used strictly to execute the automation actions you configure:</p>
+      <ul>
+        <li>Listing your authorized Facebook Pages and Google Drive folders inside your private workspace.</li>
+        <li>Fetching queued media and matching captions prior to your scheduled time slots.</li>
+        <li>Publishing photos, videos, or Reels to your selected Facebook Pages at your chosen timezone and slots.</li>
+      </ul>
+      <p>We do <strong class="hi">not</strong> sell, rent, or share your personal data, tokens, or media content with third parties or advertisers.</p>
+
+      <h2>3. Google API Services User Data Policy</h2>
       <p>
-        Data is used strictly within your isolated workspace to publish content from your Google Drive folders to your selected Facebook Pages and report delivery status.
-        RM Automation does not sell, rent, or transfer Google user data or Facebook data to third parties or use it for advertising, profiling, or model training; requests are sent only to Google Drive API and Meta Graph API as required to perform scheduled posting.
+        RM Automation's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements. Access is strictly limited to reading user-selected Drive folders, processing scheduled media/captions, and performing authorized cleanup for those folders.
       </p>
-      <h2>Security</h2>
-      <p>
-        All Google OAuth refresh tokens and Facebook access tokens are encrypted at rest with AES-256-GCM before being persisted to Cloudflare D1.
-        Access to each workspace is protected by an admin password or unique License Key and signed <code>HttpOnly</code> session cookies.
-      </p>
-      <h2>Revoking Access &amp; Data Deletion</h2>
-      <p>
-        You may disconnect Google Drive or delete stored Facebook accounts, Pages, and encrypted tokens at any time directly inside your workspace, or follow the steps on the
-        <a href="/data-deletion.html">Data Deletion page</a>.
-      </p>
-    </div>
+
+      <h2>4. Data Security &amp; 7-Day Automatic Retention</h2>
+      <ul>
+        <li>All Facebook and Google OAuth tokens are encrypted at rest using AES-GCM encryption before storage.</li>
+        <li>Operational event logs and completed post queue records older than <strong class="hi">7 days</strong> are automatically deleted from the database.</li>
+      </ul>
+
+      <h2 id="data-deletion">5. User Data Deletion Instructions</h2>
+      <p>You retain full control over your connected accounts and stored data and may revoke access or delete data immediately at any time:</p>
+      <div class="callout">
+        <ul>
+          <li><strong class="hi">Disconnect Google Drive:</strong> Open <em>Accounts &amp; Drive</em> inside RM Automation and click <em>Disconnect</em>. Stored Google refresh/access tokens are immediately erased. You can also revoke access from your Google Account Security permissions.</li>
+          <li><strong class="hi">Remove Facebook Pages or Accounts:</strong> Open <em>Accounts &amp; Drive</em> or <em>Pages &amp; Schedule</em> and click <em>Delete</em> on any connected Facebook account or Page to permanently remove its encrypted tokens and schedules. You may also remove the app under Facebook Settings &rarr; <em>Business Integrations</em>.</li>
+          <li><strong class="hi">Full Workspace Removal:</strong> Workspace administrators can delete an entire license key from the dashboard, which immediately cascades and permanently deletes all associated accounts, Pages, schedules, and logs.</li>
+        </ul>
+      </div>
+    </article>
   </main>
 </body>
 </html>

@@ -1821,6 +1821,11 @@ export default {
         return handleLogout(request, env);
       }
 
+      // Redirect /privacy-policy alias cleanly to /privacy (served by static assets)
+      if (path === '/privacy-policy' && (method === 'GET' || method === 'HEAD')) {
+        return Response.redirect(`${url.origin}/privacy`, 301);
+      }
+
       // Google Drive OAuth endpoints
       if (path === '/auth/google/start' && method === 'GET') {
         return handleGoogleStart(request, env);
